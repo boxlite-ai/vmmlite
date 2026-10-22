@@ -8,7 +8,7 @@
 
 ## TL;DR
 
-265 lines of C, not counting comments, that boot a stock x86_64 Linux kernel on KVM to a PID 1 that
+266 lines of C, not counting comments, that boot a stock x86_64 Linux kernel on KVM to a PID 1 that
 prints one line through a virtio console and reboots.
 
 ## Run it
