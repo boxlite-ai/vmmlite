@@ -1,7 +1,7 @@
-// tinyvm.c: the smallest VMM that boots Linux (x86_64, KVM). For learning only.
-// Build: gcc -O2 -o tinyvm tinyvm.c        Run: ./tinyvm bzImage initramfs.cpio
+// vmmlite.c: the smallest VMM that boots Linux (x86_64, KVM). For learning only.
+// Build: gcc -O2 -o vmmlite vmmlite.c      Run: ./vmmlite bzImage initramfs.cpio
 //
-//   tinyvm (this process)        KVM (host kernel)               CPU (VT-x / AMD-V)
+//   vmmlite (this process)       KVM (host kernel)               CPU (VT-x / AMD-V)
 //   +--------------------+ ioctl +-----------------------+ entry +--------------------+
 //   | ram: guest RAM     |------>| VM: memslot, PIC,     |------>| runs guest code    |
 //   | run: kvm_run page  |<------| IOAPIC, PIT; vCPU     |<------| until a VM exit    |
@@ -88,7 +88,7 @@ static unsigned char com1(int vm, int reg, int out, unsigned char v) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 3) die("usage: tinyvm bzImage initramfs\n");
+  if (argc != 3) die("usage: vmmlite bzImage initramfs\n");
   size_t ksize, isize;
   unsigned char *k = load(argv[1], &ksize);              // the kernel image (bzImage)
   unsigned char *initrd = load(argv[2], &isize);         // the initramfs archive (cpio)
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------------------------------
   // 2. Guest RAM: plain host memory that KVM maps at guest physical address 0.
   //
-  //   tinyvm's virtual memory                guest physical memory
+  //   vmmlite's virtual memory               guest physical memory
   //   ram ------------> +---------+          +---------+ <- 0x00000000
   //                     | 512 MiB | memslot 0| 512 MiB |
   //                     |         |<========>|         |    the same bytes: ram[X] is
@@ -146,7 +146,7 @@ int main(int argc, char **argv) {
   //   ksize      +------------------------------+
   //
   if (memcmp(k + 0x202, "HdrS", 4) || !(k[0x236] & 1))   // the header's magic; XLF_KERNEL_64
-    die("tinyvm: need a bzImage with a 64-bit entry\n");
+    die("vmmlite: need a bzImage with a 64-bit entry\n");
   size_t setup = ((k[0x1f1] ? k[0x1f1] : 4) + 1) * 512;  // setup_sects (0 means 4) + boot sector
   memcpy(ram + KERNEL, k + setup, ksize - setup);
 
@@ -155,20 +155,20 @@ int main(int argc, char **argv) {
   //
   //   guest physical  contents                              written by
   //   0x00000000 +-----------------------------------+
-  //   0x00000500 | GDT                               |  tinyvm, section 6
-  //   0x00007000 | zero page: struct boot_params     |  tinyvm, here; the kernel reads it
-  //   0x00009000 | page tables: PML4, PDPT, PD       |  tinyvm, section 6
-  //   0x00020000 | "console=ttyS0 panic=-1\0"        |  tinyvm, here
+  //   0x00000500 | GDT                               |  vmmlite, section 6
+  //   0x00007000 | zero page: struct boot_params     |  vmmlite, here; the kernel reads it
+  //   0x00009000 | page tables: PML4, PDPT, PD       |  vmmlite, section 6
+  //   0x00020000 | "console=ttyS0 panic=-1\0"        |  vmmlite, here
   //   0x0009fc00 +-----------------------------------+
-  //              | MP table, then the legacy BIOS    |  tinyvm, section 5; not in the E820
+  //              | MP table, then the legacy BIOS    |  vmmlite, section 5; not in the E820
   //              | hole                              |
   //   0x00100000 +-----------------------------------+
-  //              | decompressor + compressed vmlinux |  tinyvm, section 3
+  //              | decompressor + compressed vmlinux |  vmmlite, section 3
   //              +-----------------------------------+
   //              | free: the guest unpacks vmlinux   |  the guest, during boot
   //              | here, then uses it as its memory  |
   //   initrd_at  +-----------------------------------+
-  //              | initramfs (cpio archive)          |  tinyvm, here
+  //              | initramfs (cpio archive)          |  vmmlite, here
   //   0x20000000 +-----------------------------------+  end of RAM
   //
   //   Zero page fields set here, as offsets from 0x7000; every other byte stays 0:
@@ -301,7 +301,7 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------------------------------
   // 8. Run. KVM returns to us only when the guest touches a device we must emulate:
   //
-  //   port         device                     guest      tinyvm
+  //   port         device                     guest      vmmlite
   //   0x3f8-0x3ff  COM1, a 16550 UART         IN / OUT   com1(): registers, IRQ 4
   //   0x64         i8042 keyboard controller  OUT 0xfe   guest reset: return 0
   //   other        any other port or MMIO     IN / OUT   reads 0, writes ignored

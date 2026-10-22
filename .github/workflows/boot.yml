@@ -30,12 +30,12 @@ jobs:
 
       - name: Build with warnings as errors
         run: |
-          gcc -O2 -Wall -Wextra -Werror -o tinyvm tinyvm.c
+          gcc -O2 -Wall -Wextra -Werror -o vmmlite vmmlite.c
           gcc -O2 -Wall -Wextra -Werror -static -o init init.c
           echo init | cpio -o -H newc > initramfs.cpio
 
       - name: Boot the runner's own kernel
         run: |
           sudo install -m 644 "/boot/vmlinuz-$(uname -r)" bzImage
-          timeout 120 ./tinyvm bzImage initramfs.cpio | tee boot.log
+          timeout 120 ./vmmlite bzImage initramfs.cpio | tee boot.log
           grep -q 'Hello from PID 1!' boot.log

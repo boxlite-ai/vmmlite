@@ -1,7 +1,7 @@
-# tinyvm
+# vmmlite
 
 > [!WARNING]
-> **For learning only. Do not use tinyvm in production.** It skips what a production VMM needs: it
+> **For learning only. Do not use vmmlite in production.** It skips what a production VMM needs: it
 > does not validate its input files, runs without a sandbox, and emulates only a serial port and a
 > reset. To run code in a micro-VM, use a production VMM such as Firecracker or Cloud Hypervisor, or
 > a sandbox such as [BoxLite](https://github.com/boxlite-ai/boxlite).
@@ -17,11 +17,11 @@ You need x86_64 Linux with KVM, access to `/dev/kvm` (on Ubuntu, join the `kvm` 
 with static glibc and cpio (on Ubuntu, `sudo apt install gcc libc6-dev cpio`).
 
 ```sh
-gcc -O2 -Wall -Wextra -o tinyvm tinyvm.c
+gcc -O2 -Wall -Wextra -o vmmlite vmmlite.c
 gcc -O2 -Wall -Wextra -static -o init init.c
 echo init | cpio -o -H newc > initramfs.cpio
 sudo install -m 644 /boot/vmlinuz-$(uname -r) bzImage
-./tinyvm bzImage initramfs.cpio
+./vmmlite bzImage initramfs.cpio
 ```
 
 About three seconds later, trimmed:
@@ -36,13 +36,13 @@ Hello from PID 1!
 [    1.766049] reboot: Restarting system
 ```
 
-tinyvm exits with status 0 when the guest reboots. The kernel must take the 64-bit entry (Linux
+vmmlite exits with status 0 when the guest reboots. The kernel must take the 64-bit entry (Linux
 3.8 or later) and build in the 8250 serial console, MP table parsing and initramfs support, as
 Ubuntu's kernels do.
 
 ## How it works
 
-`tinyvm.c` has eight numbered sections, one per boot step:
+`vmmlite.c` has eight numbered sections, one per boot step:
 
 | § | Step | KVM calls |
 | --- | --- | --- |
