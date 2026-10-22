@@ -36,7 +36,6 @@ Trimmed output:
 [    1.964332] printk: legacy bootconsole [uart8250] disabled
 [    3.619940] Run /init as init process
 Hello from PID 1!
-[    3.655297] reboot: Restarting system
 ```
 
 The lines up to `bootconsole [uart8250] disabled` come through COM1; everything after it, PID 1's
@@ -64,9 +63,9 @@ Before `main()` come the two devices:
 
 - `com1()`, a 16550 UART on IRQ 4, which carries the kernel log until the virtio console registers.
 - A virtio console at 0xd0000000 on IRQ 5. The guest's kick of its transmit queue wakes a device
-  thread through an ioeventfd, and the thread interrupts the guest through an irqfd, so the vCPU
-  never waits for the I/O. Firecracker, Cloud Hypervisor and libkrun wire their devices on KVM the
-  same way.
+  thread through an ioeventfd, without an exit to vmmlite's run loop, and the thread interrupts
+  the guest through an irqfd. Firecracker, Cloud Hypervisor and libkrun wire their devices on KVM
+  the same way.
 
 `init.c` is PID 1. It writes one line to the console, waits for the console to send it, and reboots.
 

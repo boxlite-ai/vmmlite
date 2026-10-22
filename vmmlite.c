@@ -95,35 +95,56 @@ static unsigned char com1(int vm, int reg, int out, unsigned char v) {
   return r;
 }
 
-// The virtio console: a virtqueue device wired the way Firecracker, Cloud Hypervisor and libkrun
-// wire devices on KVM, so the vCPU never waits for its I/O.
+// The virtio console: the console Linux calls hvc0, at 0xd0000000 with IRQ 5 (section 4 names both
+// on the command line). All output after the first boot lines goes through it.
+//
+//   function         called by                    what it does
+//   virtio_start()   section 1, once              gives KVM two eventfds, starts console()
+//   console()        a thread of its own          prints what the guest puts on queue 1
+//   virtio_read()    section 8, per MMIO read     returns a register's value
+//   virtio_write()   section 8, per MMIO write    stores a register, such as a queue's address
 //
 //   guest                       KVM                          vmmlite
 //   setup registers   ------->  KVM_EXIT_MMIO          --->  virtio_read(), virtio_write()
-//   kick queue 1      ------->  ioeventfd: wakes the console thread; the vCPU runs on
-//   IRQ 5             <-------  irqfd                  <---  the thread writes call
+//   kick queue 1      ------->  ioeventfd: wakes console(); the vCPU runs on
+//   IRQ 5             <-------  irqfd                  <---  console() writes call
 //
-//   Queue 1 is the transmit queue. The thread pops the buffers the driver made available,
-//   prints them, returns them in the used ring and interrupts. Data never crosses MMIO.
+//   Firecracker, Cloud Hypervisor and libkrun wire devices on KVM the same way: the kick never
+//   reaches section 8, and the data never crosses MMIO, since console() reads guest RAM itself.
 //
-static int kick, call;                                   // eventfds: guest -> thread -> guest
-static unsigned status, fsel, sel;
-static _Atomic unsigned isr;                             // interrupt status: thread sets, vCPU acks
-static struct {                                          // queue 1, from the driver's setup
+static int kick, call;                                   // eventfds: guest -> console() -> guest
+static unsigned status, fsel, sel;                       // STATUS, DEVICE_FEATURES_SEL, QUEUE_SEL
+static _Atomic unsigned isr;                             // INTERRUPT_STATUS: console() sets bit 0,
+                                                         //   the guest's IRQ 5 handler acks it
+// Queue 1, the transmit queue, as the driver set it up: three areas in guest RAM.
+//   desc   the descriptor table: num buffers, each {guest address, length, flags, next}
+//   avail  driver -> device: idx counts the chains the driver has added, and ring[idx % num]
+//          holds each chain's first descriptor, its head
+//   used   device -> driver: idx counts the chains handed back, and ring[] holds their heads
+//   next   how many heads console() has taken from avail; it chases avail->idx
+static struct {
   unsigned num; unsigned short next;
   struct vring_desc *desc; struct vring_avail *avail; struct vring_used *used;
 } q;
 
-static void *console(void *arg) {                        // the device thread
+// console(): the device, on its own thread. read() sleeps until the guest kicks queue 1. Then, for
+// each head the driver has added since, it writes the chain's buffers to stdout and puts the head
+// in the used ring, which hands the buffers back. Last, it sets bit 0 of INTERRUPT_STATUS and
+// writes call, so KVM raises IRQ 5. Linux's console driver spins on the used ring until its buffer
+// comes back, so every line the guest prints waits for this thread.
+static void *console(void *arg) {
   for (unsigned long n; read(kick, &n, 8) == 8;) {       // sleep until the guest kicks queue 1
+    // acquire: after reading avail->idx, see the ring entries the driver wrote before bumping it
     while (q.next != __atomic_load_n(&q.avail->idx, __ATOMIC_ACQUIRE)) {
       unsigned short head = q.avail->ring[q.next++ % q.num];
-      // walk the descriptor chain
+      // walk the descriptor chain; a buffer at guest address addr is at ram + addr here
       for (unsigned short i = head;; i = q.desc[i].next) {
         fwrite(ram + q.desc[i].addr, 1, q.desc[i].len, stdout);
         if (!(q.desc[i].flags & VRING_DESC_F_NEXT)) break;
       }
-      q.used->ring[q.used->idx % q.num].id = head;       // return it; len stays 0
+      q.used->ring[q.used->idx % q.num].id = head;       // hand it back; len stays 0: nothing
+                                                         //   was written into the buffers
+      // release: the entry above becomes visible to the driver before the new used->idx does
       __atomic_store_n(&q.used->idx, q.used->idx + 1, __ATOMIC_RELEASE);
     }
     isr |= 1;                                            // "used buffers"
@@ -132,18 +153,57 @@ static void *console(void *arg) {                        // the device thread
   return arg;
 }
 
+// virtio_start(): connects the console to KVM, then starts console(). An eventfd is a counter in
+// the kernel: a write adds to it, and a read waits until it is nonzero, returns it and resets it.
+//   kick   KVM_IOEVENTFD: when the guest writes 1, queue 1's index, to QUEUE_NOTIFY, KVM adds 1
+//          to kick and resumes the guest at once, with no exit to section 8. Other values still
+//          exit, so queue 0's kick reaches virtio_write().
+//   call   KVM_IRQFD: when console() writes to call, KVM raises IRQ 5 in the guest.
 static void virtio_start(int vm) {
-  kick = eventfd(0, 0), call = eventfd(0, 0);
+  kick = eventfd(0, 0), call = eventfd(0, 0);            // both counters start at 0
   struct kvm_ioeventfd io = {.addr = VIRTIO + VIRTIO_MMIO_QUEUE_NOTIFY, .len = 4,
       .fd = kick, .datamatch = 1, .flags = KVM_IOEVENTFD_FLAG_DATAMATCH};
-  IOCTL(vm, KVM_IOEVENTFD, &io);                         // a kick of queue 1 wakes the thread
+  IOCTL(vm, KVM_IOEVENTFD, &io);                         // a kick of queue 1 wakes console()
   struct kvm_irqfd irq = {.fd = call, .gsi = 5};
   IOCTL(vm, KVM_IRQFD, &irq);                            // a write to call raises IRQ 5
   pthread_t thread;
-  pthread_create(&thread, 0, console, 0);
+  pthread_create(&thread, 0, console, 0);                // it sleeps until the first kick
 }
 
-// Setup reads and writes: section 8 calls these on the vCPU thread.
+// virtio_read(), virtio_write(): the registers. Section 8 calls them on the vCPU thread, once for
+// each MMIO exit into the console's 4 KiB, with reg the offset in it:
+//
+//   reg    register             guest reads                guest writes
+//   0x000  MAGIC_VALUE          "virt"                     -
+//   0x004  VERSION              2: virtio 1.0 or later     -
+//   0x008  DEVICE_ID            3: a console               -
+//   0x010  DEVICE_FEATURES      fsel 0: 0, no features     -
+//                               fsel 1: 1, bit 32, which
+//                               is VIRTIO_F_VERSION_1
+//   0x014  DEVICE_FEATURES_SEL  -                          fsel: which 32 feature bits to read
+//   0x030  QUEUE_SEL            -                          sel: the queue the writes below set up
+//   0x034  QUEUE_NUM_MAX        256: the largest queue     -
+//   0x038  QUEUE_NUM            -                          q.num, if sel is 1
+//   0x050  QUEUE_NOTIFY         -                          a kick; only queue 0's comes here
+//   0x060  INTERRUPT_STATUS     isr                        -
+//   0x064  INTERRUPT_ACK        -                          clears those bits of isr
+//   0x070  STATUS               status                     status; 0 resets the device
+//   0x080  QUEUE_DESC_LOW       -                          q.desc = ram + value, if sel is 1
+//   0x090  QUEUE_AVAIL_LOW      -                          q.avail = ram + value, if sel is 1
+//   0x0a0  QUEUE_USED_LOW       -                          q.used = ram + value, if sel is 1
+//   other                       0                          ignored, such as the addresses' high
+//                                                            halves: guest RAM is below 4 GiB
+//
+// Linux's virtio-mmio driver at boot, one MMIO exit per register access:
+//   1. reads MAGIC_VALUE, VERSION and DEVICE_ID, then writes STATUS 0: a reset
+//   2. adds the STATUS bits ACKNOWLEDGE and DRIVER, reading STATUS and writing it back each time
+//   3. reads DEVICE_FEATURES with fsel 1 and 0, accepts VIRTIO_F_VERSION_1, adds FEATURES_OK,
+//      and reads STATUS again to check that the device kept it
+//   4. sets up queue 0 (input, which vmmlite ignores) and queue 1: QUEUE_SEL, QUEUE_NUM_MAX,
+//      QUEUE_NUM, the three ring addresses, QUEUE_READY
+//   5. adds DRIVER_OK: the device is live
+// After that, only its IRQ 5 handler comes here: it reads INTERRUPT_STATUS and writes the value
+// back to INTERRUPT_ACK.
 static unsigned virtio_read(unsigned long reg) {
   switch (reg) {
   case VIRTIO_MMIO_MAGIC_VALUE:      return 0x74726976;  // "virt"
