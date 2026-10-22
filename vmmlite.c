@@ -112,6 +112,16 @@ static unsigned char com1(int vm, int reg, int is_out, unsigned char byte) {
 //   kick queue 1      ------->  ioeventfd: wakes console_thread(); the vCPU runs on
 //   IRQ 5             <-------  irqfd                  <---  console_thread() writes irq_eventfd
 //
+//   IRQ 5 is set in three places, which must agree:
+//   where vmmlite sets it                      who uses it
+//   section 4, the command line:          -->  virtio-mmio driver makes a device at 0xd0000000
+//     virtio_mmio.device=4K@0xd0000000:5       with IRQ 5, then calls request_irq(5, vm_interrupt)
+//                                              when the console sets up its queues
+//   section 5, the MP table:              -->  Linux learns IRQ 5 is IOAPIC pin 5, and puts
+//     ISA IRQ 5 -> IOAPIC pin 5                IRQ 5's vector in pin 5's entry
+//   console_init(), the irqfd:            -->  KVM raises GSI 5, which is IOAPIC pin 5, each
+//     .gsi = 5                                 time console_thread() writes irq_eventfd
+//
 //   Firecracker, Cloud Hypervisor and libkrun wire devices on KVM the same way: the kick never
 //   reaches section 8, and the data never crosses MMIO: console_thread() reads guest RAM itself.
 //
