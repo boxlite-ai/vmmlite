@@ -22,46 +22,48 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define RAM_SIZE  (512UL << 20)                          // guest RAM: 512 MiB at address 0
-#define GDT       0x500                                  // where the boot GDT goes
-#define ZERO_PAGE 0x7000                                 // where struct boot_params goes
-#define PML4      0x9000                                 // where the 3 pages of page tables go
-#define CMDLINE   0x20000                                // where the command line goes
-#define MPTABLE   0x9fc00                                // where the MP table goes
-#define KERNEL    0x100000                               // 1 MiB: where the kernel goes
-#define VIRTIO    0xd0000000                             // the virtio console's 4 KiB of registers
+#define RAM_SIZE             (512UL << 20)               // guest RAM: 512 MiB at address 0
+// Where each thing goes, as guest physical addresses:
+#define GDT_START            0x500                       // the boot GDT
+#define ZERO_PAGE_START      0x7000                      // struct boot_params, the zero page
+#define PML4_START           0x9000                      // 3 pages of page tables, PML4 first
+#define CMDLINE_START        0x20000                     // the kernel command line
+#define MPTABLE_START        0x9fc00                     // the MP table
+#define KERNEL_START         0x100000                    // 1 MiB: the kernel
+#define VIRTIO_CONSOLE_START 0xd0000000                  // the virtio console's 4 KiB of registers
 
 static unsigned char *ram;                               // guest RAM, mapped in section 2
 
-static void die(const char *msg) { fputs(msg, stderr); exit(1); }
+static void die(const char *message) { fputs(message, stderr); exit(1); }
 
-static long ck(long ret, const char *what) {             // stop with a message if a call failed;
-  if (ret < 0) { perror(what); exit(1); }                //   every call here fails with -1
-  return ret;
+static long check(long result, const char *what) {       // stop with a message if a call failed;
+  if (result < 0) { perror(what); exit(1); }             //   every call here fails with -1
+  return result;
 }
 
 // One KVM call: an ioctl on a KVM file descriptor, checked; a failure prints the request name.
-#define IOCTL(fd, request, arg) ck(ioctl(fd, request, arg), #request)
+#define IOCTL(fd, request, arg) check(ioctl(fd, request, arg), #request)
 
 static void *map(int fd, size_t size,                    // mmap(), checked: size bytes of fd,
                  int prot, int flags) {                  //   or fresh memory when fd is -1
-  void *p = mmap(0, size, prot, flags, fd, 0);
-  return (void *)ck((long)p, "mmap");                    // MAP_FAILED is -1, so ck() sees it
+  void *mapped = mmap(0, size, prot, flags, fd, 0);
+  return (void *)check((long)mapped, "mmap");            // MAP_FAILED is -1, so check() sees it
 }
 
-static unsigned char *load(const char *path,             // a whole file, mapped read-only,
-                           size_t *size) {               //   and its size
-  int fd = ck(open(path, O_RDONLY), path);
-  struct stat st;
-  ck(fstat(fd, &st), path);
-  *size = st.st_size;
+static unsigned char *map_file(const char *path,         // a whole file, mapped read-only,
+                               size_t *size) {           //   and its size
+  int fd = check(open(path, O_RDONLY), path);
+  struct stat info;
+  check(fstat(fd, &info), path);
+  *size = info.st_size;
   return map(fd, *size, PROT_READ, MAP_PRIVATE);
 }
 
-static unsigned char sum(unsigned char *p, int n) {      // byte sum; an MP checksum makes it 0
-  unsigned char s = 0;
-  while (n--) s += *p++;
-  return s;
+// The low byte of the sum of count bytes; a correct MP checksum makes it 0.
+static unsigned char byte_sum(unsigned char *bytes, int count) {
+  unsigned char total = 0;
+  while (count--) total += *bytes++;
+  return total;
 }
 
 // COM1: a 16550 UART at ports 0x3f8-0x3ff, as much of it as Linux's 8250 driver needs to send.
@@ -75,168 +77,178 @@ static unsigned char sum(unsigned char *p, int n) {      // byte sum; an MP chec
 //
 //   IRQ 4 is up while THRI is on and a "THR empty" event is pending; reading IIR acks the event.
 //
-static unsigned char com1(int vm, int reg, int out, unsigned char v) {
-  static unsigned char ier, lcr, thre;                   // thre: a "THR empty" event not yet acked
-  unsigned char r = 0;
+static unsigned char com1(int vm, int reg, int is_out, unsigned char byte) {
+  static unsigned char ier, lcr, thr_empty;              // IER, LCR, and a "THR empty" not acked
+  unsigned char reply = 0;                               // what an IN reads
   if (lcr & 0x80 && reg < 2) return 0;                   // DLAB: the baud divisor; no need
-  if (out) {                                             //   to emulate it
-    if (reg == 0) { putchar(v); thre = 1; }
-    if (reg == 1) { thre |= v & ~ier & 2; ier = v; }
-    if (reg == 3) lcr = v;
+  if (is_out) {                                          //   to emulate it
+    if (reg == 0) { putchar(byte); thr_empty = 1; }
+    if (reg == 1) { thr_empty |= byte & ~ier & 2; ier = byte; }
+    if (reg == 3) lcr = byte;
   } else {
-    if (reg == 1) r = ier;
-    if (reg == 2) r = ier & 2 && thre ? 2 : 1;
-    if (reg == 2 && r == 2) thre = 0;
-    if (reg == 3) r = lcr;
-    if (reg == 5) r = 0x60;
+    if (reg == 1) reply = ier;
+    if (reg == 2) reply = ier & 2 && thr_empty ? 2 : 1;
+    if (reg == 2 && reply == 2) thr_empty = 0;
+    if (reg == 3) reply = lcr;
+    if (reg == 5) reply = 0x60;
   }
-  struct kvm_irq_level irq = {.irq = 4, .level = ier & 2 && thre};
-  IOCTL(vm, KVM_IRQ_LINE, &irq);                         // IRQ 4, up or down
-  return r;
+  struct kvm_irq_level irq_line = {.irq = 4, .level = ier & 2 && thr_empty};
+  IOCTL(vm, KVM_IRQ_LINE, &irq_line);                    // IRQ 4, up or down
+  return reply;
 }
 
 // The virtio console: the console Linux calls hvc0, at 0xd0000000 with IRQ 5 (section 4 names both
 // on the command line). All output after the first boot lines goes through it.
 //
-//   function         called by                    what it does
-//   virtio_start()   section 1, once              gives KVM two eventfds, starts console()
-//   console()        a thread of its own          prints what the guest puts on queue 1
-//   virtio_read()    section 8, per MMIO read     returns a register's value
-//   virtio_write()   section 8, per MMIO write    stores a register, such as a queue's address
+//   function                  called from          what it does
+//   console_init()            section 1, once      gives KVM two eventfds, starts console_thread()
+//   console_thread()          a thread of its own  prints what the guest puts on queue 1
+//   console_register_read()   section 8            answers the guest's read of a register
+//   console_register_write()  section 8            applies the guest's write to a register
 //
 //   guest                       KVM                          vmmlite
-//   setup registers   ------->  KVM_EXIT_MMIO          --->  virtio_read(), virtio_write()
-//   kick queue 1      ------->  ioeventfd: wakes console(); the vCPU runs on
-//   IRQ 5             <-------  irqfd                  <---  console() writes call
+//   setup registers   ------->  KVM_EXIT_MMIO          --->  console_register_read(),
+//                                                            console_register_write()
+//   kick queue 1      ------->  ioeventfd: wakes console_thread(); the vCPU runs on
+//   IRQ 5             <-------  irqfd                  <---  console_thread() writes irq_eventfd
 //
 //   Firecracker, Cloud Hypervisor and libkrun wire devices on KVM the same way: the kick never
-//   reaches section 8, and the data never crosses MMIO, since console() reads guest RAM itself.
+//   reaches section 8, and the data never crosses MMIO: console_thread() reads guest RAM itself.
 //
-static int kick, call;                                   // eventfds: guest -> console() -> guest
-static unsigned status, fsel, sel;                       // STATUS, DEVICE_FEATURES_SEL, QUEUE_SEL
-static _Atomic unsigned isr;                             // INTERRUPT_STATUS: console() sets bit 0,
-                                                         //   the guest's IRQ 5 handler acks it
-// Queue 1, the transmit queue, as the driver set it up: three areas in guest RAM.
-//   desc   the descriptor table: num buffers, each {guest address, length, flags, next}
-//   avail  driver -> device: idx counts the chains the driver has added, and ring[idx % num]
-//          holds each chain's first descriptor, its head
-//   used   device -> driver: idx counts the chains handed back, and ring[] holds their heads
-//   next   how many heads console() has taken from avail; it chases avail->idx
-static struct {
-  unsigned num; unsigned short next;
-  struct vring_desc *desc; struct vring_avail *avail; struct vring_used *used;
-} q;
+static int kick_eventfd, irq_eventfd;                    // guest -> console_thread() -> guest
+// The registers the driver writes and reads back: STATUS, DEVICE_FEATURES_SEL, QUEUE_SEL.
+static unsigned device_status, features_select, queue_select;
+static _Atomic unsigned interrupt_status;                // console_thread() sets bit 0; the
+                                                         //   guest's IRQ 5 handler acks it
 
-// console(): the device, on its own thread. read() sleeps until the guest kicks queue 1. Then, for
-// each head the driver has added since, it writes the chain's buffers to stdout and puts the head
-// in the used ring, which hands the buffers back. Last, it sets bit 0 of INTERRUPT_STATUS and
-// writes call, so KVM raises IRQ 5. Linux's console driver spins on the used ring until its buffer
-// comes back, so every line the guest prints waits for this thread.
-static void *console(void *arg) {
-  for (unsigned long n; read(kick, &n, 8) == 8;) {       // sleep until the guest kicks queue 1
-    // acquire: after reading avail->idx, see the ring entries the driver wrote before bumping it
-    while (q.next != __atomic_load_n(&q.avail->idx, __ATOMIC_ACQUIRE)) {
-      unsigned short head = q.avail->ring[q.next++ % q.num];
+// Queue 1, the transmit queue, as the driver set it up: three areas in guest RAM, and how far
+// console_thread() has read.
+static unsigned queue_size;                              // entries in each area, from QUEUE_NUM
+static struct vring_desc *desc_table;                    // the buffers: {guest address, length,
+                                                         //   flags, next}
+static struct vring_avail *avail_ring;                   // driver -> device: idx counts the chains
+                                                         //   added; ring[] holds their heads
+static struct vring_used *used_ring;                     // device -> driver: heads handed back,
+                                                         //   counted by idx
+static unsigned short next_avail;                        // how many avail_ring entries were taken
+
+// console_thread(): the device, on its own thread. read() sleeps until the guest kicks queue 1.
+// Then, for each head the driver has added since, it writes the chain's buffers to stdout and
+// puts the head in the used ring, which hands the buffers back. Last, it sets bit 0 of
+// interrupt_status and writes irq_eventfd, so KVM raises IRQ 5. Linux's console driver spins on
+// the used ring until its buffer comes back, so every line the guest prints waits for this thread.
+static void *console_thread(void *arg) {
+  // read() returns the number of kicks since the last read, at least 1
+  for (unsigned long kicks; read(kick_eventfd, &kicks, 8) == 8;) {
+    // acquire: after reading avail_ring->idx, see the entries the driver wrote before bumping it
+    while (next_avail != __atomic_load_n(&avail_ring->idx, __ATOMIC_ACQUIRE)) {
+      unsigned short head = avail_ring->ring[next_avail++ % queue_size];
       // walk the descriptor chain; a buffer at guest address addr is at ram + addr here
-      for (unsigned short i = head;; i = q.desc[i].next) {
-        fwrite(ram + q.desc[i].addr, 1, q.desc[i].len, stdout);
-        if (!(q.desc[i].flags & VRING_DESC_F_NEXT)) break;
+      for (unsigned short desc = head;; desc = desc_table[desc].next) {
+        fwrite(ram + desc_table[desc].addr, 1, desc_table[desc].len, stdout);
+        if (!(desc_table[desc].flags & VRING_DESC_F_NEXT)) break;
       }
-      q.used->ring[q.used->idx % q.num].id = head;       // hand it back; len stays 0: nothing
-                                                         //   was written into the buffers
-      // release: the entry above becomes visible to the driver before the new used->idx does
-      __atomic_store_n(&q.used->idx, q.used->idx + 1, __ATOMIC_RELEASE);
+      // hand the chain back; len stays 0, since nothing was written into the buffers
+      used_ring->ring[used_ring->idx % queue_size].id = head;
+      // release: the entry above becomes visible to the driver before the new idx does
+      __atomic_store_n(&used_ring->idx, used_ring->idx + 1, __ATOMIC_RELEASE);
     }
-    isr |= 1;                                            // "used buffers"
-    if (write(call, &n, 8) != 8) break;                  // KVM injects IRQ 5
+    interrupt_status |= 1;                               // bit 0: "used buffers"
+    if (write(irq_eventfd, &kicks, 8) != 8) break;       // KVM injects IRQ 5
   }
   return arg;
 }
 
-// virtio_start(): connects the console to KVM, then starts console(). An eventfd is a counter in
-// the kernel: a write adds to it, and a read waits until it is nonzero, returns it and resets it.
-//   kick   KVM_IOEVENTFD: when the guest writes 1, queue 1's index, to QUEUE_NOTIFY, KVM adds 1
-//          to kick and resumes the guest at once, with no exit to section 8. Other values still
-//          exit, so queue 0's kick reaches virtio_write().
-//   call   KVM_IRQFD: when console() writes to call, KVM raises IRQ 5 in the guest.
-static void virtio_start(int vm) {
-  kick = eventfd(0, 0), call = eventfd(0, 0);            // both counters start at 0
-  struct kvm_ioeventfd io = {.addr = VIRTIO + VIRTIO_MMIO_QUEUE_NOTIFY, .len = 4,
-      .fd = kick, .datamatch = 1, .flags = KVM_IOEVENTFD_FLAG_DATAMATCH};
-  IOCTL(vm, KVM_IOEVENTFD, &io);                         // a kick of queue 1 wakes console()
-  struct kvm_irqfd irq = {.fd = call, .gsi = 5};
-  IOCTL(vm, KVM_IRQFD, &irq);                            // a write to call raises IRQ 5
+// console_init(): connects the console to KVM, then starts console_thread(). An eventfd is a
+// counter in the kernel: a write adds to it, and a read waits until it is nonzero, returns it and
+// resets it.
+//   kick_eventfd  KVM_IOEVENTFD: when the guest writes 1, queue 1's index, to QUEUE_NOTIFY, KVM
+//                 adds 1 to it and resumes the guest at once, with no exit to section 8. Other
+//                 values still exit, so queue 0's kick reaches console_register_write().
+//   irq_eventfd   KVM_IRQFD: when console_thread() writes to it, KVM raises IRQ 5 in the guest.
+static void console_init(int vm) {
+  // two counters, both 0
+  kick_eventfd = eventfd(0, 0), irq_eventfd = eventfd(0, 0);
+  struct kvm_ioeventfd ioeventfd = {.addr = VIRTIO_CONSOLE_START + VIRTIO_MMIO_QUEUE_NOTIFY,
+      .len = 4, .fd = kick_eventfd, .datamatch = 1, .flags = KVM_IOEVENTFD_FLAG_DATAMATCH};
+  IOCTL(vm, KVM_IOEVENTFD, &ioeventfd);                  // queue 1's kick wakes console_thread()
+  struct kvm_irqfd irqfd = {.fd = irq_eventfd, .gsi = 5};
+  IOCTL(vm, KVM_IRQFD, &irqfd);                          // a write to irq_eventfd raises IRQ 5
   pthread_t thread;
-  pthread_create(&thread, 0, console, 0);                // it sleeps until the first kick
+  pthread_create(&thread, 0, console_thread, 0);         // it sleeps until the first kick
 }
 
-// virtio_read(), virtio_write(): the registers. Section 8 calls them on the vCPU thread, once for
-// each MMIO exit into the console's 4 KiB, with reg the offset in it:
+// console_register_read(), console_register_write(): the console's registers, its control path;
+// the data itself goes through queue 1. Section 8 calls them on the vCPU thread, once for each
+// MMIO exit into the console's 4 KiB, with reg the offset in it:
 //
 //   reg    register             guest reads                guest writes
 //   0x000  MAGIC_VALUE          "virt"                     -
 //   0x004  VERSION              2: virtio 1.0 or later     -
 //   0x008  DEVICE_ID            3: a console               -
-//   0x010  DEVICE_FEATURES      fsel 0: 0, no features     -
-//                               fsel 1: 1, bit 32, which
-//                               is VIRTIO_F_VERSION_1
-//   0x014  DEVICE_FEATURES_SEL  -                          fsel: which 32 feature bits to read
-//   0x030  QUEUE_SEL            -                          sel: the queue the writes below set up
+//   0x010  DEVICE_FEATURES      features_select 0: 0       -
+//                               features_select 1: 1, bit
+//                               32, VIRTIO_F_VERSION_1
+//   0x014  DEVICE_FEATURES_SEL  -                          features_select
+//   0x030  QUEUE_SEL            -                          queue_select
 //   0x034  QUEUE_NUM_MAX        256: the largest queue     -
-//   0x038  QUEUE_NUM            -                          q.num, if sel is 1
+//   0x038  QUEUE_NUM            -                          queue_size *
 //   0x050  QUEUE_NOTIFY         -                          a kick; only queue 0's comes here
-//   0x060  INTERRUPT_STATUS     isr                        -
-//   0x064  INTERRUPT_ACK        -                          clears those bits of isr
-//   0x070  STATUS               status                     status; 0 resets the device
-//   0x080  QUEUE_DESC_LOW       -                          q.desc = ram + value, if sel is 1
-//   0x090  QUEUE_AVAIL_LOW      -                          q.avail = ram + value, if sel is 1
-//   0x0a0  QUEUE_USED_LOW       -                          q.used = ram + value, if sel is 1
+//   0x060  INTERRUPT_STATUS     interrupt_status           -
+//   0x064  INTERRUPT_ACK        -                          clears those interrupt_status bits
+//   0x070  STATUS               device_status              device_status; 0 resets the device
+//   0x080  QUEUE_DESC_LOW       -                          desc_table = ram + value *
+//   0x090  QUEUE_AVAIL_LOW      -                          avail_ring = ram + value *
+//   0x0a0  QUEUE_USED_LOW       -                          used_ring = ram + value *
 //   other                       0                          ignored, such as the addresses' high
 //                                                            halves: guest RAM is below 4 GiB
+//   * only while queue_select is 1: vmmlite serves queue 1 alone
 //
 // Linux's virtio-mmio driver at boot, one MMIO exit per register access:
 //   1. reads MAGIC_VALUE, VERSION and DEVICE_ID, then writes STATUS 0: a reset
 //   2. adds the STATUS bits ACKNOWLEDGE and DRIVER, reading STATUS and writing it back each time
-//   3. reads DEVICE_FEATURES with fsel 1 and 0, accepts VIRTIO_F_VERSION_1, adds FEATURES_OK,
-//      and reads STATUS again to check that the device kept it
+//   3. reads DEVICE_FEATURES with features_select 1 and 0, accepts VIRTIO_F_VERSION_1, adds
+//      FEATURES_OK, and reads STATUS again to check that the device kept it
 //   4. sets up queue 0 (input, which vmmlite ignores) and queue 1: QUEUE_SEL, QUEUE_NUM_MAX,
 //      QUEUE_NUM, the three ring addresses, QUEUE_READY
 //   5. adds DRIVER_OK: the device is live
 // After that, only its IRQ 5 handler comes here: it reads INTERRUPT_STATUS and writes the value
 // back to INTERRUPT_ACK.
-static unsigned virtio_read(unsigned long reg) {
+static unsigned console_register_read(unsigned long reg) {
   switch (reg) {
   case VIRTIO_MMIO_MAGIC_VALUE:      return 0x74726976;  // "virt"
   case VIRTIO_MMIO_VERSION:          return 2;
   case VIRTIO_MMIO_DEVICE_ID:        return 3;           // a console
-  case VIRTIO_MMIO_DEVICE_FEATURES:  return fsel == 1;   // bit 32: VIRTIO_F_VERSION_1
+  // bit 32, VIRTIO_F_VERSION_1, is bit 0 of the upper 32 feature bits
+  case VIRTIO_MMIO_DEVICE_FEATURES:  return features_select == 1;
   case VIRTIO_MMIO_QUEUE_NUM_MAX:    return 256;
-  case VIRTIO_MMIO_INTERRUPT_STATUS: return isr;
-  case VIRTIO_MMIO_STATUS:           return status;
+  case VIRTIO_MMIO_INTERRUPT_STATUS: return interrupt_status;
+  case VIRTIO_MMIO_STATUS:           return device_status;
   }
   return 0;
 }
 
-static void virtio_write(unsigned long reg, unsigned v) {
+static void console_register_write(unsigned long reg, unsigned value) {
   switch (reg) {
-  case VIRTIO_MMIO_DEVICE_FEATURES_SEL: fsel = v; break;
-  case VIRTIO_MMIO_QUEUE_SEL:        sel = v; break;
-  case VIRTIO_MMIO_INTERRUPT_ACK:    isr &= ~v; break;
-  case VIRTIO_MMIO_STATUS:           status = v; break;
+  case VIRTIO_MMIO_DEVICE_FEATURES_SEL: features_select = value; break;
+  case VIRTIO_MMIO_QUEUE_SEL:        queue_select = value; break;
+  case VIRTIO_MMIO_INTERRUPT_ACK:    interrupt_status &= ~value; break;
+  case VIRTIO_MMIO_STATUS:           device_status = value; break;
   }
-  if (sel == 1) switch (reg) {                           // queue 1's size and ring addresses
-  case VIRTIO_MMIO_QUEUE_NUM:        q.num = v; break;
-  case VIRTIO_MMIO_QUEUE_DESC_LOW:   q.desc = (void *)(ram + v); break;
-  case VIRTIO_MMIO_QUEUE_AVAIL_LOW:  q.avail = (void *)(ram + v); break;
-  case VIRTIO_MMIO_QUEUE_USED_LOW:   q.used = (void *)(ram + v); break;
+  if (queue_select == 1) switch (reg) {                  // queue 1's size and ring addresses
+  case VIRTIO_MMIO_QUEUE_NUM:        queue_size = value; break;
+  case VIRTIO_MMIO_QUEUE_DESC_LOW:   desc_table = (void *)(ram + value); break;
+  case VIRTIO_MMIO_QUEUE_AVAIL_LOW:  avail_ring = (void *)(ram + value); break;
+  case VIRTIO_MMIO_QUEUE_USED_LOW:   used_ring = (void *)(ram + value); break;
   }
 }
 
 int main(int argc, char **argv) {
   if (argc != 3) die("usage: vmmlite bzImage initramfs\n");
-  size_t ksize, isize;
-  unsigned char *k = load(argv[1], &ksize);              // the kernel image (bzImage)
-  unsigned char *initrd = load(argv[2], &isize);         // the initramfs archive (cpio)
+  // the kernel image (bzImage) and the initramfs archive (cpio), mapped from their files
+  size_t bzimage_size, initramfs_size;
+  unsigned char *bzimage = map_file(argv[1], &bzimage_size);
+  unsigned char *initramfs = map_file(argv[2], &initramfs_size);
 
   // ------------------------------------------------------------------------------------------
   // 1. A VM: an empty address space, plus interrupt controllers and a timer.
@@ -248,14 +260,14 @@ int main(int argc, char **argv) {
   //                              +-- ioeventfd, irqfd: the virtio console's kick, IRQ 5
   //   The kernel handles guest accesses to these; they never reach the loop in section 8.
   //
-  int kvm = ck(open("/dev/kvm", O_RDWR), "/dev/kvm");
+  int kvm = check(open("/dev/kvm", O_RDWR), "/dev/kvm");
   int vm = IOCTL(kvm, KVM_CREATE_VM, 0);
   IOCTL(vm, KVM_SET_TSS_ADDR, 0xfffbd000);               // 3 pages Intel VT-x needs
   IOCTL(vm, KVM_CREATE_IRQCHIP, 0);                      // PIC, IOAPIC, LAPICs in the kernel
-  struct kvm_pit_config pit = {
+  struct kvm_pit_config pit_config = {
       .flags = KVM_PIT_SPEAKER_DUMMY};                   // also emulate port 0x61
-  IOCTL(vm, KVM_CREATE_PIT2, &pit);                      // the 8254 timer, in the kernel
-  virtio_start(vm);                                      // the virtio console and its thread
+  IOCTL(vm, KVM_CREATE_PIT2, &pit_config);               // the 8254 timer, in the kernel
+  console_init(vm);                                      // the virtio console and its thread
 
   // ------------------------------------------------------------------------------------------
   // 2. Guest RAM: plain host memory that KVM maps at guest physical address 0.
@@ -270,107 +282,111 @@ int main(int argc, char **argv) {
   ram = map(-1, RAM_SIZE, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS                  // not backed by a file,
             | MAP_NORESERVE);                            //   no swap reserved up front
-  struct kvm_userspace_memory_region mem = {
+  struct kvm_userspace_memory_region memslot = {
       .slot = 0, .guest_phys_addr = 0,
       .memory_size = RAM_SIZE,
       .userspace_addr = (unsigned long)ram};
-  IOCTL(vm, KVM_SET_USER_MEMORY_REGION, &mem);           // now guest address X is ram[X]
+  IOCTL(vm, KVM_SET_USER_MEMORY_REGION, &memslot);       // now guest address X is ram[X]
 
   // ------------------------------------------------------------------------------------------
   // 3. The kernel. A bzImage is a boot sector, the 16-bit setup code, then the real kernel.
   //
-  //   bzImage (k[], file offsets)                      guest RAM (ram[])
-  //   0x000      +------------------------------+
-  //              | boot sector (512 B)          |      skipped: real-mode code
-  //   0x1f1      |   setup header begins -------|----> zero page, section 4
-  //   0x200      +------------------------------+
-  //              | setup code, setup_sects*512 B|      skipped: 16-bit code
-  //   setup      +------------------------------+
-  //              | decompressor, with its       |----> 0x100000 (KERNEL), copied here;
-  //              | 64-bit entry at +0x200       |      the vCPU starts at 0x100200
-  //              | + compressed vmlinux         |
-  //   ksize      +------------------------------+
+  //   bzImage (bzimage[], file offsets)                guest RAM (ram[])
+  //   0x000        +------------------------------+
+  //                | boot sector (512 B)          |      skipped: real-mode code
+  //   0x1f1        |   setup header begins -------|----> zero page, section 4
+  //   0x200        +------------------------------+
+  //                | setup code, setup_sects*512 B|      skipped: 16-bit code
+  //   setup_size   +------------------------------+
+  //                | decompressor, with its       |----> KERNEL_START (0x100000), copied
+  //                | 64-bit entry at +0x200       |      here; the vCPU starts at 0x100200
+  //                | + compressed vmlinux         |
+  //   bzimage_size +------------------------------+
   //
-  if (memcmp(k + 0x202, "HdrS", 4) || !(k[0x236] & 1))   // the header's magic; XLF_KERNEL_64
+  // the header's magic, and XLF_KERNEL_64: the bzImage has a 64-bit entry
+  if (memcmp(bzimage + 0x202, "HdrS", 4) || !(bzimage[0x236] & 1))
     die("vmmlite: need a bzImage with a 64-bit entry\n");
-  size_t setup = ((k[0x1f1] ? k[0x1f1] : 4) + 1) * 512;  // setup_sects (0 means 4) + boot sector
-  memcpy(ram + KERNEL, k + setup, ksize - setup);
+  // setup_sects (0 means 4) sectors of setup code, plus the boot sector
+  size_t setup_size = ((bzimage[0x1f1] ? bzimage[0x1f1] : 4) + 1) * 512;
+  memcpy(ram + KERNEL_START, bzimage + setup_size, bzimage_size - setup_size);
 
   // ------------------------------------------------------------------------------------------
   // 4. The zero page: everything the kernel learns about this machine. Guest RAM afterwards:
   //
-  //   guest physical  contents, high addresses on top       written by
-  //   0x20000000 +-----------------------------------+  end of RAM
-  //              | initramfs (cpio archive)          |  vmmlite, here
-  //   initrd_at  +-----------------------------------+
-  //              | free: the guest unpacks vmlinux   |  the guest, during boot
-  //              | here, then uses it as its memory  |
-  //              +-----------------------------------+
-  //              | decompressor + compressed vmlinux |  vmmlite, section 3
-  //   0x00100000 +-----------------------------------+
-  //              | MP table, then the legacy BIOS    |  vmmlite, section 5; not in the E820
-  //              | hole                              |
-  //   0x0009fc00 +-----------------------------------+
-  //   0x00020000 | command line                      |  vmmlite, here
-  //   0x00009000 | page tables: PML4, PDPT, PD       |  vmmlite, section 6
-  //   0x00007000 | zero page: struct boot_params     |  vmmlite, here; the kernel reads it
-  //   0x00000500 | GDT                               |  vmmlite, section 6
-  //   0x00000000 +-----------------------------------+
+  //   guest physical   contents, high addresses on top       written by
+  //   0x20000000      +-----------------------------------+  end of RAM
+  //                   | initramfs (cpio archive)          |  vmmlite, here
+  //   initramfs_start +-----------------------------------+
+  //                   | free: the guest unpacks vmlinux   |  the guest, during boot
+  //                   | here, then uses it as its memory  |
+  //                   +-----------------------------------+
+  //                   | decompressor + compressed vmlinux |  vmmlite, section 3
+  //   0x00100000      +-----------------------------------+
+  //                   | MP table, then the legacy BIOS    |  vmmlite, section 5; not in the E820
+  //                   | hole                              |
+  //   0x0009fc00      +-----------------------------------+
+  //   0x00020000      | command line                      |  vmmlite, here
+  //   0x00009000      | page tables: PML4, PDPT, PD       |  vmmlite, section 6
+  //   0x00007000      | zero page: struct boot_params     |  vmmlite, here; the kernel reads it
+  //   0x00000500      | GDT                               |  vmmlite, section 6
+  //   0x00000000      +-----------------------------------+
   //
   //   Zero page fields set here, as offsets from 0x7000; every other byte stays 0:
-  //   +0x1e8  e820_entries    2                  +0x218  ramdisk_image  initrd_at
-  //   +0x1f1  hdr             copied from file   +0x21c  ramdisk_size   isize
+  //   +0x1e8  e820_entries    2                  +0x218  ramdisk_image  initramfs_start
+  //   +0x1f1  hdr             copied from file   +0x21c  ramdisk_size   initramfs_size
   //   +0x210  type_of_loader  0xff               +0x228  cmd_line_ptr   0x20000
   //   +0x2d0  e820_table      {0, 0x9fc00, RAM}, {1 MiB, RAM_SIZE - 1 MiB, RAM}
   //
-  struct boot_params *bp = (void *)(ram + ZERO_PAGE);    // fresh RAM, so already all 0
-  memcpy(&bp->hdr, k + 0x1f1,                            // start from the kernel's own
-         0x202 + k[0x201] - 0x1f1);                      //   header; byte 0x201 sets its end
-  bp->hdr.type_of_loader = 0xff;                         // "other"; 0 = Linux skips the initrd
-  bp->hdr.cmd_line_ptr = CMDLINE;
-  strcpy((char *)ram + CMDLINE,                          // log to COM1 until hvc0, the virtio
+  // fresh RAM, so already all 0
+  struct boot_params *zero_page = (void *)(ram + ZERO_PAGE_START);
+  memcpy(&zero_page->hdr, bzimage + 0x1f1,               // start from the kernel's own
+         0x202 + bzimage[0x201] - 0x1f1);                //   header; byte 0x201 sets its end
+  zero_page->hdr.type_of_loader = 0xff;                  // "other"; 0 = Linux skips the initrd
+  zero_page->hdr.cmd_line_ptr = CMDLINE_START;
+  strcpy((char *)ram + CMDLINE_START,                    // log to COM1 until hvc0, the virtio
          "earlycon=uart8250,io,0x3f8 console=hvc0 "      //   console, takes over; reboot on a
          "panic=-1 virtio_mmio.device=4K@0xd0000000:5"); //   panic; the console's 4 KiB, IRQ 5
-  unsigned long initrd_at = (RAM_SIZE - isize)           // the initramfs goes at the top
-                            & ~0xfffUL;                  //   of RAM, 4 KiB aligned
-  memcpy(ram + initrd_at, initrd, isize);
-  bp->hdr.ramdisk_image = initrd_at;
-  bp->hdr.ramdisk_size = isize;
-  bp->e820_table[0] = (struct boot_e820_entry){
+  // the initramfs goes at the top of RAM, 4 KiB aligned
+  unsigned long initramfs_start = (RAM_SIZE - initramfs_size) & ~0xfffUL;
+  memcpy(ram + initramfs_start, initramfs, initramfs_size);
+  zero_page->hdr.ramdisk_image = initramfs_start;
+  zero_page->hdr.ramdisk_size = initramfs_size;
+  zero_page->e820_table[0] = (struct boot_e820_entry){
       .addr = 0, .size = 0x9fc00, .type = 1};            // usable RAM below the MP table
-  bp->e820_table[1] = (struct boot_e820_entry){
-      .addr = KERNEL, .size = RAM_SIZE - KERNEL,         // usable RAM from 1 MiB to the end
+  zero_page->e820_table[1] = (struct boot_e820_entry){   // usable RAM from 1 MiB to the end
+      .addr = KERNEL_START, .size = RAM_SIZE - KERNEL_START,
       .type = 1};                                        // (type 1 means usable RAM)
-  bp->e820_entries = 2;
+  zero_page->e820_entries = 2;
 
   // ------------------------------------------------------------------------------------------
   // 5. The MP table: how Linux finds the CPU, the IOAPIC, and the IOAPIC pin of each ISA IRQ.
   //    Linux searches the last KB below 640 KiB for "_MP_"; the E820 keeps it out of RAM.
   //
-  //   mp[]  bytes    entry                        contents
-  //   0     16       floating pointer "_MP_"      ---> the header, at 0x9fc10
-  //   16    44       header "PCMP"                length, entry count, LAPIC at 0xfee00000
-  //   60    20       CPU                          LAPIC 0, version 0x14, enabled, boot CPU
-  //   80    8        bus                          bus 0: ISA
-  //   88    8        IOAPIC                       IOAPIC 1, version 0x11, at 0xfec00000
-  //   96    16 x 8   IRQ routes                   ISA IRQ n -> IOAPIC 1, pin n
-  //   224   2 x 8    local IRQ routes             PIC (ExtINT) -> LINT0, NMI -> LINT1
+  //   mptable[]  bytes    entry                    contents
+  //   0          16       floating pointer "_MP_"  ---> the header, at 0x9fc10
+  //   16         44       header "PCMP"            length, entry count, LAPIC at 0xfee00000
+  //   60         20       CPU                      LAPIC 0, version 0x14, enabled, boot CPU
+  //   80         8        bus                      bus 0: ISA
+  //   88         8        IOAPIC                   IOAPIC 1, version 0x11, at 0xfec00000
+  //   96         16 x 8   IRQ routes               ISA IRQ n -> IOAPIC 1, pin n
+  //   224        2 x 8    local IRQ routes         PIC (ExtINT) -> LINT0, NMI -> LINT1
   //
-#define IRQ(n) 3, 0, 0, 0, 0, n, 1, n
-  static unsigned char mp[] = {
+#define ROUTE(irq) 3, 0, 0, 0, 0, irq, 1, irq            // ISA IRQ irq -> IOAPIC 1, pin irq
+  static unsigned char mptable[] = {
       '_', 'M', 'P', '_', 0x10, 0xfc, 0x09, 0, 1, 4,
       [16] = 'P', 'C', 'M', 'P', [22] = 4, [50] = 21, 0, 0, 0, 0xe0, 0xfe,
       [60] = 0, 0, 0x14, 3,
       [80] = 1, 0, 'I', 'S', 'A', ' ', ' ', ' ',
       2, 1, 0x11, 1, 0, 0, 0xc0, 0xfe,
-      IRQ(0), IRQ(1), IRQ(2), IRQ(3), IRQ(4), IRQ(5), IRQ(6), IRQ(7),
-      IRQ(8), IRQ(9), IRQ(10), IRQ(11), IRQ(12), IRQ(13), IRQ(14), IRQ(15),
+      ROUTE(0), ROUTE(1), ROUTE(2), ROUTE(3), ROUTE(4), ROUTE(5), ROUTE(6), ROUTE(7),
+      ROUTE(8), ROUTE(9), ROUTE(10), ROUTE(11), ROUTE(12), ROUTE(13), ROUTE(14), ROUTE(15),
       4, 3, 0, 0, 0, 0, 0xff, 0,
       4, 1, 0, 0, 0, 0, 0xff, 1};
-  mp[20] = sizeof mp - 16;                               // the header's table length,
-  mp[23] = -sum(mp + 16, sizeof mp - 16);                //   and checksum
-  mp[10] = -sum(mp, 16);                                 // the floating pointer's checksum
-  memcpy(ram + MPTABLE, mp, sizeof mp);
+  // the header's table length and checksum, then the floating pointer's checksum
+  mptable[20] = sizeof mptable - 16;
+  mptable[23] = -byte_sum(mptable + 16, sizeof mptable - 16);
+  mptable[10] = -byte_sum(mptable, 16);
+  memcpy(ram + MPTABLE_START, mptable, sizeof mptable);
 
   // ------------------------------------------------------------------------------------------
   // 6. Long mode needs a GDT and page tables in guest RAM, where the CPU reads them.
@@ -382,12 +398,13 @@ int main(int argc, char **argv) {
   //   0xb000          PD     [n] ---> n * 2 MiB, for n < 512: virtual X = physical X below 1 GiB
   //
   unsigned long gdt[] = {0, 0, 0x00af9b000000ffff, 0x00cf93000000ffff};
-  memcpy(ram + GDT, gdt, sizeof gdt);
-  unsigned long *pt = (void *)(ram + PML4);              // PML4, PDPT, PD: 512 entries each
-  pt[0] = (PML4 + 0x1000) | 3;                           // PML4[0] ---> PDPT; present, writable
-  pt[512] = (PML4 + 0x2000) | 3;                         // PDPT[0] ---> PD
-  for (unsigned long n = 0; n < 512; n++)
-    pt[1024 + n] = n << 21 | 0x83;                       // PD[n] ---> a 2 MiB page (bit 7)
+  memcpy(ram + GDT_START, gdt, sizeof gdt);
+  unsigned long *pml4 = (void *)(ram + PML4_START);      // 3 tables of 512 entries, one page
+  unsigned long *pdpt = pml4 + 512, *pd = pdpt + 512;    //   each, one after another
+  pml4[0] = (PML4_START + 0x1000) | 3;                   // PML4[0] ---> PDPT; present, writable
+  pdpt[0] = (PML4_START + 0x2000) | 3;                   // PDPT[0] ---> PD
+  for (unsigned long page = 0; page < 512; page++)
+    pd[page] = page << 21 | 0x83;                        // PD[page] ---> a 2 MiB page (bit 7)
 
   // ------------------------------------------------------------------------------------------
   // 7. One vCPU: the host's CPU features, and the registers the 64-bit boot protocol wants.
@@ -406,44 +423,44 @@ int main(int argc, char **argv) {
   //   run = mmap of the vCPU fd:  page 0  struct kvm_run: exit_reason, io, mmio, ...
   //                               page 1  port I/O data bytes, at run + run->io.data_offset
   //
-  int cpu = IOCTL(vm, KVM_CREATE_VCPU, 0);
+  int vcpu = IOCTL(vm, KVM_CREATE_VCPU, 0);
   long run_size = IOCTL(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
-  struct kvm_run *run = map(cpu, run_size,               // map the vCPU fd itself,
+  struct kvm_run *run = map(vcpu, run_size,              // map the vCPU fd itself,
                             PROT_READ | PROT_WRITE,
                             MAP_SHARED);                 //   shared with KVM
   struct kvm_cpuid2 *cpuid = calloc(1, sizeof *cpuid
       + 256 * sizeof cpuid->entries[0]);
   cpuid->nent = 256;                                     // KVM's maximum number of entries
   IOCTL(kvm, KVM_GET_SUPPORTED_CPUID, cpuid);            // fill it with what host + KVM offer
-  for (unsigned i = 0; i < cpuid->nent; i++)             // in leaf 1, the feature bits:
-    if (cpuid->entries[i].function == 1) {
-      cpuid->entries[i].ebx &= 0x00ffffff;               //   APIC ID 0, not the host CPU's
-      cpuid->entries[i].ecx |= 1u << 31 | 1u << 24;      //   set "in a VM" and "TSC deadline"
+  for (unsigned entry = 0; entry < cpuid->nent; entry++) // in leaf 1, the feature bits:
+    if (cpuid->entries[entry].function == 1) {
+      cpuid->entries[entry].ebx &= 0x00ffffff;           //   APIC ID 0, not the host CPU's
+      cpuid->entries[entry].ecx |= 1u << 31 | 1u << 24;  //   set "in a VM" and "TSC deadline"
     }
-  IOCTL(cpu, KVM_SET_CPUID2, cpuid);                     // the guest's CPUID answers come from here
-  struct kvm_sregs s;                                    // segment and control registers
-  IOCTL(cpu, KVM_GET_SREGS, &s);                         // start from the reset state
-  struct kvm_segment seg = {                             // a flat segment:
+  IOCTL(vcpu, KVM_SET_CPUID2, cpuid);                    // the guest's CPUID answers come from here
+  struct kvm_sregs sregs;                                // segment and control registers
+  IOCTL(vcpu, KVM_GET_SREGS, &sregs);                    // start from the reset state
+  struct kvm_segment segment = {                         // a flat segment:
       .base = 0, .limit = ~0u,                           //   all 4 GiB,
       .present = 1, .s = 1, .db = 1, .g = 1};            //   valid, code/data, 32-bit, 4 KiB units
-  seg.type = 3;                                          // read/write data,
-  seg.selector = 0x18;                                   //   selector __BOOT_DS,
-  s.ds = s.es = s.fs = s.gs = s.ss = seg;                //   for every data segment
-  seg.type = 11;                                         // execute/read code,
-  seg.selector = 0x10;                                   //   selector __BOOT_CS,
-  seg.db = 0, seg.l = 1;                                 //   64-bit,
-  s.cs = seg;                                            //   for the code segment
-  s.gdt.base = GDT, s.gdt.limit = sizeof gdt - 1;
-  s.cr3 = PML4;                                          // the page tables
-  s.cr4 |= 1 << 5;                                       // CR4.PAE
-  s.cr0 |= 1u << 31 | 1;                                 // CR0.PG, CR0.PE: paging on
-  s.efer |= 1 << 10 | 1 << 8;                            // EFER.LMA, EFER.LME: long mode
-  IOCTL(cpu, KVM_SET_SREGS, &s);                         // apply
-  struct kvm_regs r = {
-      .rip = KERNEL + 0x200,                             // the 64-bit entry point
-      .rsi = ZERO_PAGE,                                  // boot protocol: RSI = the zero page
+  segment.type = 3;                                      // read/write data, selector
+  segment.selector = 0x18;                               //   __BOOT_DS, for every data segment:
+  sregs.ds = sregs.es = sregs.fs = sregs.gs = sregs.ss = segment;
+  segment.type = 11;                                     // execute/read code,
+  segment.selector = 0x10;                               //   selector __BOOT_CS,
+  segment.db = 0, segment.l = 1;                         //   64-bit,
+  sregs.cs = segment;                                    //   for the code segment
+  sregs.gdt.base = GDT_START, sregs.gdt.limit = sizeof gdt - 1;
+  sregs.cr3 = PML4_START;                                // the page tables
+  sregs.cr4 |= 1 << 5;                                   // CR4.PAE
+  sregs.cr0 |= 1u << 31 | 1;                             // CR0.PG, CR0.PE: paging on
+  sregs.efer |= 1 << 10 | 1 << 8;                        // EFER.LMA, EFER.LME: long mode
+  IOCTL(vcpu, KVM_SET_SREGS, &sregs);                    // apply
+  struct kvm_regs regs = {
+      .rip = KERNEL_START + 0x200,                       // the 64-bit entry point
+      .rsi = ZERO_PAGE_START,                            // boot protocol: RSI = the zero page
       .rflags = 2};                                      // interrupts off (bit 1 is always set)
-  IOCTL(cpu, KVM_SET_REGS, &r);
+  IOCTL(vcpu, KVM_SET_REGS, &regs);
 
   // ------------------------------------------------------------------------------------------
   // 8. Run. KVM returns to us only when the guest touches a device we must emulate:
@@ -451,34 +468,36 @@ int main(int argc, char **argv) {
   //   port         device                     guest      vmmlite
   //   0x3f8-0x3ff  COM1, a 16550 UART         IN / OUT   com1(): registers, IRQ 4
   //   0x64         i8042 keyboard controller  OUT 0xfe   guest reset: return 0
-  //   0xd0000000   virtio console registers   MMIO       virtio_read(), virtio_write()
+  //   0xd0000000   virtio console registers   MMIO       console_register_read(),
+  //                                                      console_register_write()
   //   other        any other port or MMIO     IN / OUT   reads 0, writes ignored
-  //   A kick of the console's queue 1 never comes here: KVM wakes its thread instead.
+  //   A kick of the console's queue 1 never comes here: KVM wakes console_thread() instead.
   //
   for (;;) {
-    IOCTL(cpu, KVM_RUN, 0);                              // run the guest until it exits
-    unsigned char *io = (unsigned char *)run             // port I/O data bytes,
-                        + run->io.data_offset;           //   inside the run pages
+    IOCTL(vcpu, KVM_RUN, 0);                             // run the guest until it exits
+    unsigned char *io_data = (unsigned char *)run        // port I/O data bytes,
+                             + run->io.data_offset;      //   inside the run pages
     int port = run->io.port;                             // the port, for an I/O exit
     if (run->exit_reason == KVM_EXIT_MMIO) {             // memory that is not RAM
-      unsigned long reg = run->mmio.phys_addr - VIRTIO;  // an offset into the console's 4 KiB
-      unsigned v = 0;
+      // an offset into the console's 4 KiB
+      unsigned long reg = run->mmio.phys_addr - VIRTIO_CONSOLE_START;
+      unsigned value = 0;
       if (run->mmio.is_write) {
-        memcpy(&v, run->mmio.data, 4);
-        if (reg < 0x1000) virtio_write(reg, v);
+        memcpy(&value, run->mmio.data, 4);
+        if (reg < 0x1000) console_register_write(reg, value);
       } else {
-        if (reg < 0x1000) v = virtio_read(reg);
+        if (reg < 0x1000) value = console_register_read(reg);
         memset(run->mmio.data, 0, 8);                    // other addresses read 0
-        memcpy(run->mmio.data, &v, 4);
+        memcpy(run->mmio.data, &value, 4);
       }
     } else if (run->exit_reason != KVM_EXIT_IO) {        // anything else, e.g. a triple fault
       fprintf(stderr, "unexpected exit %u\n", run->exit_reason);
       return 1;
-    } else if (port >= 0x3f8 && port <= 0x3ff) {         // COM1; an IN reads what com1()
-      *io = com1(vm, port & 7, run->io.direction, *io);  //   returns, an OUT ignores it
+    } else if (port >= 0x3f8 && port <= 0x3ff) {         // COM1; an IN reads com1()'s reply
+      *io_data = com1(vm, port & 7, run->io.direction, *io_data);
     } else if (run->io.direction == KVM_EXIT_IO_IN) {    // the guest reads another port:
-      memset(io, 0, run->io.size);                       //   it reads 0
-    } else if (port == 0x64 && *io == 0xfe) {            // keyboard controller reset:
+      memset(io_data, 0, run->io.size);                  //   it reads 0
+    } else if (port == 0x64 && *io_data == 0xfe) {       // keyboard controller reset:
       return 0;                                          //   the guest rebooted; done
     }                                                    // any other port write: ignored
   }
