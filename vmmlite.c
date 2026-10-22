@@ -261,11 +261,11 @@ int main(int argc, char **argv) {
   // 2. Guest RAM: plain host memory that KVM maps at guest physical address 0.
   //
   //   vmmlite's virtual memory               guest physical memory
-  //   ram ------------> +---------+          +---------+ <- 0x00000000
+  //   ram + RAM_SIZE -> +---------+          +---------+ <- 0x20000000
   //                     | 512 MiB | memslot 0| 512 MiB |
   //                     |         |<========>|         |    the same bytes: ram[X] is
   //                     |         |          |         |    guest physical address X
-  //   ram + RAM_SIZE -> +---------+          +---------+ <- 0x20000000
+  //   ram ------------> +---------+          +---------+ <- 0x00000000
   //
   ram = map(-1, RAM_SIZE, PROT_READ | PROT_WRITE,
             MAP_PRIVATE | MAP_ANONYMOUS                  // not backed by a file,
@@ -299,23 +299,23 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------------------------------
   // 4. The zero page: everything the kernel learns about this machine. Guest RAM afterwards:
   //
-  //   guest physical  contents                              written by
-  //   0x00000000 +-----------------------------------+
-  //   0x00000500 | GDT                               |  vmmlite, section 6
-  //   0x00007000 | zero page: struct boot_params     |  vmmlite, here; the kernel reads it
-  //   0x00009000 | page tables: PML4, PDPT, PD       |  vmmlite, section 6
-  //   0x00020000 | command line                      |  vmmlite, here
-  //   0x0009fc00 +-----------------------------------+
-  //              | MP table, then the legacy BIOS    |  vmmlite, section 5; not in the E820
-  //              | hole                              |
-  //   0x00100000 +-----------------------------------+
-  //              | decompressor + compressed vmlinux |  vmmlite, section 3
-  //              +-----------------------------------+
+  //   guest physical  contents, high addresses on top       written by
+  //   0x20000000 +-----------------------------------+  end of RAM
+  //              | initramfs (cpio archive)          |  vmmlite, here
+  //   initrd_at  +-----------------------------------+
   //              | free: the guest unpacks vmlinux   |  the guest, during boot
   //              | here, then uses it as its memory  |
-  //   initrd_at  +-----------------------------------+
-  //              | initramfs (cpio archive)          |  vmmlite, here
-  //   0x20000000 +-----------------------------------+  end of RAM
+  //              +-----------------------------------+
+  //              | decompressor + compressed vmlinux |  vmmlite, section 3
+  //   0x00100000 +-----------------------------------+
+  //              | MP table, then the legacy BIOS    |  vmmlite, section 5; not in the E820
+  //              | hole                              |
+  //   0x0009fc00 +-----------------------------------+
+  //   0x00020000 | command line                      |  vmmlite, here
+  //   0x00009000 | page tables: PML4, PDPT, PD       |  vmmlite, section 6
+  //   0x00007000 | zero page: struct boot_params     |  vmmlite, here; the kernel reads it
+  //   0x00000500 | GDT                               |  vmmlite, section 6
+  //   0x00000000 +-----------------------------------+
   //
   //   Zero page fields set here, as offsets from 0x7000; every other byte stays 0:
   //   +0x1e8  e820_entries    2                  +0x218  ramdisk_image  initrd_at
