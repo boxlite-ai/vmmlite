@@ -30,7 +30,7 @@ jobs:
 
       - name: Build with warnings as errors
         run: |
-          gcc -O2 -Wall -Wextra -Werror -o vmmlite vmmlite.c
+          gcc -O2 -Wall -Wextra -Werror -pthread -o vmmlite vmmlite.c
           gcc -O2 -Wall -Wextra -Werror -static -o init init.c
           echo init | cpio -o -H newc > initramfs.cpio
 
