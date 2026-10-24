@@ -210,8 +210,7 @@ static void console_init(int vm) {
 //   0x080  QUEUE_DESC_LOW       -                          desc_table = ram + value *
 //   0x090  QUEUE_AVAIL_LOW      -                          avail_ring = ram + value *
 //   0x0a0  QUEUE_USED_LOW       -                          used_ring = ram + value *
-//   other                       0                          ignored, such as the addresses' high
-//                                                            halves: guest RAM is below 4 GiB
+//   other                       0                          ignored
 //   * only while queue_select is 1: vmmlite serves queue 1 alone
 //
 // Linux's virtio-mmio driver at boot, one MMIO exit per register access:
@@ -238,15 +237,23 @@ static unsigned console_register_read(unsigned long reg) {
   return 0;
 }
 
+// console_register_write(): the guest wrote value to the register at offset reg. It keeps what
+// the console needs and ignores the rest: the features the driver accepts, QUEUE_READY, queue 0's
+// setup and kick, and the high halves of addresses, since guest RAM is below 4 GiB.
 static void console_register_write(unsigned long reg, unsigned value) {
   switch (reg) {
+  // which 32 feature bits the next DEVICE_FEATURES read returns: 0 = bits 0-31, 1 = bits 32-63
   case VIRTIO_MMIO_DEVICE_FEATURES_SEL: features_select = value; break;
+  // which queue the QUEUE_* writes that follow set up
   case VIRTIO_MMIO_QUEUE_SEL:        queue_select = value; break;
+  // clear the interrupt_status bits that the IRQ 5 handler acks
   case VIRTIO_MMIO_INTERRUPT_ACK:    interrupt_status &= ~value; break;
+  // the driver's progress bits, which it reads back; writing 0 is its reset
   case VIRTIO_MMIO_STATUS:           device_status = value; break;
   }
   if (queue_select == 1) switch (reg) {                  // queue 1's size and ring addresses
   case VIRTIO_MMIO_QUEUE_NUM:        queue_size = value; break;
+  // each area's guest physical address X becomes a pointer: guest address X is ram + X here
   case VIRTIO_MMIO_QUEUE_DESC_LOW:   desc_table = (void *)(ram + value); break;
   case VIRTIO_MMIO_QUEUE_AVAIL_LOW:  avail_ring = (void *)(ram + value); break;
   case VIRTIO_MMIO_QUEUE_USED_LOW:   used_ring = (void *)(ram + value); break;
