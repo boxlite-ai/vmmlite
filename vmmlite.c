@@ -372,24 +372,46 @@ int main(int argc, char **argv) {
   // 5. The MP table: how Linux finds the CPU, the IOAPIC, and the IOAPIC pin of each ISA IRQ.
   //    Linux searches the last KB below 640 KiB for "_MP_"; the E820 keeps it out of RAM.
   //
-  //   mptable[]  bytes    entry                    contents
-  //   0          16       floating pointer "_MP_"  ---> the header, at 0x9fc10
-  //   16         44       header "PCMP"            length, entry count, LAPIC at 0xfee00000
-  //   60         20       CPU                      LAPIC 0, version 0x14, enabled, boot CPU
-  //   80         8        bus                      bus 0: ISA
-  //   88         8        IOAPIC                   IOAPIC 1, version 0x11, at 0xfec00000
-  //   96         16 x 8   IRQ routes               ISA IRQ n -> IOAPIC 1, pin n
-  //   224        2 x 8    local IRQ routes         PIC (ExtINT) -> LINT0, NMI -> LINT1
+  //   mptable[]  bytes    entry                    what it tells Linux
+  //   0          16       floating pointer "_MP_"  where the header is
+  //   16         44       header "PCMP"            how many entries follow; where the LAPIC is
+  //   60         20       CPU                      one CPU: the boot CPU
+  //   80         8        bus                      bus 0 is an ISA bus
+  //   88         8        IOAPIC                   one IOAPIC, and where it is
+  //   96         16 x 8   IRQ routes               the IOAPIC pin of each ISA IRQ
+  //   224        2 x 8    local IRQ routes         what each CPU's LINT0 and LINT1 pins receive
+  //
+  //   Numbers wider than a byte are stored low byte first: 0x10, 0xfc, 0x09, 0 is 0x0009fc10.
+  //
+  // ROUTE(irq): one IRQ route, 8 bytes. ROUTE(5), byte by byte:
+  //
+  //   3, 0, 0, 0, 0, 5, 1, 5
+  //   |  |  '--'  |  |  |  '--- pin 5 of that IOAPIC
+  //   |  |   |    |  |  '------ IOAPIC ID 1, as in the IOAPIC entry
+  //   |  |   |    |  '--------- ISA IRQ 5
+  //   |  |   |    '------------ bus 0, the ISA bus
+  //   |  |   '----------------- flags 0: as the bus defines, so edge-triggered, active high
+  //   |  '--------------------- 0: an ordinary interrupt; the IOAPIC entry supplies its vector
+  //   '------------------------ type 3: an IRQ route
   //
 #define ROUTE(irq) 3, 0, 0, 0, 0, irq, 1, irq            // ISA IRQ irq -> IOAPIC 1, pin irq
   static unsigned char mptable[] = {
+      // floating pointer: "_MP_", the header's address 0x0009fc10, its own length in 16-byte
+      // units (1), the spec version (4: 1.4); byte 10, its checksum, is set below
       '_', 'M', 'P', '_', 0x10, 0xfc, 0x09, 0, 1, 4,
+      // header: "PCMP"; [22] the spec version (4: 1.4); [50] 21 entries; [52] the LAPIC's
+      // address 0xfee00000. [20], its length, and [23], its checksum, are set below.
       [16] = 'P', 'C', 'M', 'P', [22] = 4, [50] = 21, 0, 0, 0, 0xe0, 0xfe,
+      // CPU: type 0, LAPIC ID 0, LAPIC version 0x14, flags 3: enabled (1) + boot CPU (2)
       [60] = 0, 0, 0x14, 3,
+      // bus: type 1, bus ID 0, bus type "ISA" padded with spaces to 6 bytes
       [80] = 1, 0, 'I', 'S', 'A', ' ', ' ', ' ',
+      // IOAPIC: type 2, IOAPIC ID 1, version 0x11, flags 1: enabled, address 0xfec00000
       2, 1, 0x11, 1, 0, 0, 0xc0, 0xfe,
       ROUTE(0), ROUTE(1), ROUTE(2), ROUTE(3), ROUTE(4), ROUTE(5), ROUTE(6), ROUTE(7),
       ROUTE(8), ROUTE(9), ROUTE(10), ROUTE(11), ROUTE(12), ROUTE(13), ROUTE(14), ROUTE(15),
+      // local IRQ routes, laid out like ROUTE: type 4; ExtINT (3), the PIC's output, to pin
+      // LINT0 (0), and NMI (1) to LINT1 (1); flags, bus and IRQ 0; LAPIC ID 0xff: every CPU
       4, 3, 0, 0, 0, 0, 0xff, 0,
       4, 1, 0, 0, 0, 0, 0xff, 1};
   // the header's table length and checksum, then the floating pointer's checksum
@@ -407,14 +429,27 @@ int main(int argc, char **argv) {
   //   0xa000          PDPT   [0] ---> 0xb000
   //   0xb000          PD     [n] ---> n * 2 MiB, for n < 512: virtual X = physical X below 1 GiB
   //
+  //   A GDT entry packs a segment's base, limit and kind into 8 bytes. GDT[2], digit by digit:
+  //
+  //   0x 00 a f 9b 000000 ffff
+  //      |  | |  |    |     '--- limit bits 0-15: 0xffff
+  //      |  | |  |    '--------- base bits 0-23: 0
+  //      |  | |  '-------------- 0x9b: present, ring 0, code: execute/read, accessed
+  //      |  | '----------------- limit bits 16-19: 0xf, so the limit is 0xfffff
+  //      |  '------------------- flags 0xa: the limit counts 4 KiB units (G), 64-bit code (L)
+  //      '---------------------- base bits 24-31: 0
+  //
+  //   GDT[3], 0x00cf93000000ffff, is the same flat 4 GiB as data: 0x93 is present, ring 0,
+  //   data: read/write, accessed; flags 0xc are 4 KiB units (G) and 32-bit (D).
+  //
   unsigned long gdt[] = {0, 0, 0x00af9b000000ffff, 0x00cf93000000ffff};
   memcpy(ram + GDT_START, gdt, sizeof gdt);
   unsigned long *pml4 = (void *)(ram + PML4_START);      // 3 tables of 512 entries, one page
   unsigned long *pdpt = pml4 + 512, *pd = pdpt + 512;    //   each, one after another
-  pml4[0] = (PML4_START + 0x1000) | 3;                   // PML4[0] ---> PDPT; present, writable
+  pml4[0] = (PML4_START + 0x1000) | 3;                   // PML4[0] ---> PDPT; 3: present, writable
   pdpt[0] = (PML4_START + 0x2000) | 3;                   // PDPT[0] ---> PD
   for (unsigned long page = 0; page < 512; page++)
-    pd[page] = page << 21 | 0x83;                        // PD[page] ---> a 2 MiB page (bit 7)
+    pd[page] = page << 21 | 0x83;                        // PD[page] ---> 2 MiB page: 3 + bit 7
 
   // ------------------------------------------------------------------------------------------
   // 7. One vCPU: the host's CPU features, and the registers the 64-bit boot protocol wants.
@@ -444,7 +479,7 @@ int main(int argc, char **argv) {
   IOCTL(kvm, KVM_GET_SUPPORTED_CPUID, cpuid);            // fill it with what host + KVM offer
   for (unsigned entry = 0; entry < cpuid->nent; entry++) // in leaf 1, the feature bits:
     if (cpuid->entries[entry].function == 1) {
-      cpuid->entries[entry].ebx &= 0x00ffffff;           //   APIC ID 0, not the host CPU's
+      cpuid->entries[entry].ebx &= 0x00ffffff;           //   APIC ID, bits 31-24: 0, not the host's
       cpuid->entries[entry].ecx |= 1u << 31 | 1u << 24;  //   set "in a VM" and "TSC deadline"
     }
   IOCTL(vcpu, KVM_SET_CPUID2, cpuid);                    // the guest's CPUID answers come from here
