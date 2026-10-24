@@ -214,13 +214,16 @@ static void console_init(int vm) {
 //   * only while queue_select is 1: vmmlite serves queue 1 alone
 //
 // Linux's virtio-mmio driver at boot, one MMIO exit per register access:
-//   1. reads MAGIC_VALUE, VERSION and DEVICE_ID, then writes STATUS 0: a reset
+//   1. reads MAGIC_VALUE, VERSION, DEVICE_ID and VENDOR_ID, then writes STATUS 0: a reset
 //   2. adds the STATUS bits ACKNOWLEDGE and DRIVER, reading STATUS and writing it back each time
 //   3. reads DEVICE_FEATURES with features_select 1 and 0, accepts VIRTIO_F_VERSION_1, adds
 //      FEATURES_OK, and reads STATUS again to check that the device kept it
 //   4. sets up queue 0 (input, which vmmlite ignores) and queue 1: QUEUE_SEL, QUEUE_NUM_MAX,
 //      QUEUE_NUM, the three ring addresses, QUEUE_READY
 //   5. adds DRIVER_OK: the device is live
+//   6. gives queue 0 its 256 empty input buffers, kicking after each: 256 writes of 0 to
+//      QUEUE_NOTIFY, which the ioeventfd lets through to here
+//   7. reads STATUS once more, to check that DRIVER_OK is set
 // After that, only its IRQ 5 handler comes here: it reads INTERRUPT_STATUS and writes the value
 // back to INTERRUPT_ACK.
 static unsigned console_register_read(unsigned long reg) {
@@ -251,7 +254,9 @@ static void console_register_write(unsigned long reg, unsigned value) {
   // the driver's progress bits, which it reads back; writing 0 is its reset
   case VIRTIO_MMIO_STATUS:           device_status = value; break;
   }
-  if (queue_select == 1) switch (reg) {                  // queue 1's size and ring addresses
+  // the QUEUE_* writes set up the queue that the last QUEUE_SEL write chose; vmmlite keeps only
+  // queue 1, the transmit queue (queue 0 is input, which it ignores)
+  if (queue_select == 1) switch (reg) {
   case VIRTIO_MMIO_QUEUE_NUM:        queue_size = value; break;
   // each area's guest physical address X becomes a pointer: guest address X is ram + X here
   case VIRTIO_MMIO_QUEUE_DESC_LOW:   desc_table = (void *)(ram + value); break;
