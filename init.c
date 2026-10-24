@@ -15,8 +15,10 @@
 #include <unistd.h>
 
 int main(void) {
-  if (write(1, "Hello from PID 1!\n", 18) < 0) return 1; // fd 1: the console, hvc0
-  tcdrain(1);                                            // wait until the console has sent it all
+  const char line[] = "Hello from PID 1!\n";
+  // stdout, fd 1: the console, hvc0
+  if (write(STDOUT_FILENO, line, sizeof line - 1) < 0) return 1;
+  tcdrain(STDOUT_FILENO);                                // wait until the console has sent it all
   reboot(RB_AUTOBOOT);                                   // restart: Linux pulses the i8042
                                                          //   reset line, and vmmlite exits
 }
