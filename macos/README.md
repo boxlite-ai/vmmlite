@@ -6,7 +6,7 @@ A small C VMM boots ARM64 Linux on an Apple Silicon Mac, prints from PID 1 throu
 
 ## Details
 
-This is the macOS companion to [vmmlite's x86/KVM example](../README.md). The Mac is the host; Linux is the guest. It uses the low-level Hypervisor.framework C API, so the loader, guest memory, device registers, virtqueues, and exit loop stay visible.
+This is the macOS companion to [vmmlite's x86/KVM example](../linux-x86_64/README.md). The Mac is the host; Linux is the guest. It uses the low-level Hypervisor.framework C API, so the loader, guest memory, device registers, virtqueues, and exit loop stay visible.
 
 **For learning only.** Bounds checks catch common malformed inputs, but this is not a security boundary for untrusted guests. There is one CPU, one output console, and no disk, network, interactive input, firmware image, or snapshot support. It does not claim to implement every virtio device requirement or every ARM platform feature.
 
