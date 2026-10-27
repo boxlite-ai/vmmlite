@@ -16,6 +16,7 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: linux-x86_64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,7 +32,7 @@ jobs:
       - name: Build with warnings as errors
         run: |
           gcc -O2 -Wall -Wextra -Werror -pthread -o vmmlite vmmlite.c
-          gcc -O2 -Wall -Wextra -Werror -static -o init init.c
+          gcc -O2 -Wall -Wextra -Werror -static -o init ../init.c
           echo init | cpio -o -H newc > initramfs.cpio
 
       - name: Boot the runner's own kernel

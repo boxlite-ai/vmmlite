@@ -1,0 +1,513 @@
+{
+  "schema_version": 1,
+  "views": [
+    "architecture"
+  ],
+  "context": {
+    "kind": "overview",
+    "change_kind": "none",
+    "sources": {
+      "repository": "boxlite-ai/vmmlite"
+    }
+  },
+  "states": [
+    {
+      "id": "current",
+      "label": "Current",
+      "revision": "WORKTREE",
+      "proposed": false
+    }
+  ],
+  "nodes": [
+    {
+      "id": "console",
+      "label": "Virtio console",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 550,
+          "line_end": 589,
+          "symbol": "console_transmit",
+          "tokens": [
+            "VIRTQ_AVAIL_F_NO_INTERRUPT",
+            "VIRTIO_CONSOLE_IRQ",
+            "interrupt_status |= 1"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ioapic",
+      "label": "IOAPIC pin 5",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 195,
+          "line_end": 223,
+          "symbol": "ioapic_deliver",
+          "tokens": [
+            "pc->interrupt",
+            "IOAPIC_REMOTE",
+            "ioapic_deliver(pc, irq)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "local_apic",
+      "label": "WHP local APIC",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 897,
+          "line_end": 906,
+          "symbol": "interrupt",
+          "tokens": [
+            "WHvRequestInterrupt",
+            "request.Vector",
+            "request.TriggerMode"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "linux",
+      "label": "Linux IRQ handler",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 678,
+          "line_end": 683,
+          "symbol": "pc_irq",
+          "tokens": [
+            "interrupt_status &=",
+            "VIRTIO_CONSOLE_IRQ"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 226,
+          "line_end": 235,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "IOAPIC_REMOTE",
+            "ioapic_deliver"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 1249,
+          "line_end": 1251,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "exit.ApicEoi.InterruptVector"
+          ]
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "device_process",
+      "label": "vmmlite.exe",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 550,
+          "line_end": 589,
+          "symbol": "console_transmit",
+          "tokens": [
+            "VIRTQ_AVAIL_F_NO_INTERRUPT",
+            "VIRTIO_CONSOLE_IRQ",
+            "interrupt_status |= 1"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 195,
+          "line_end": 223,
+          "symbol": "ioapic_deliver",
+          "tokens": [
+            "pc->interrupt",
+            "IOAPIC_REMOTE",
+            "ioapic_deliver(pc, irq)"
+          ]
+        }
+      ],
+      "members": [
+        {
+          "target": "node:console",
+          "states": [
+            "current"
+          ]
+        },
+        {
+          "target": "node:ioapic",
+          "states": [
+            "current"
+          ]
+        }
+      ],
+      "scope": "execution"
+    },
+    {
+      "id": "interrupt_engine",
+      "label": "WHP",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 897,
+          "line_end": 906,
+          "symbol": "interrupt",
+          "tokens": [
+            "WHvRequestInterrupt",
+            "request.Vector",
+            "request.TriggerMode"
+          ]
+        }
+      ],
+      "members": [
+        {
+          "target": "node:local_apic",
+          "states": [
+            "current"
+          ]
+        }
+      ],
+      "scope": "compute"
+    },
+    {
+      "id": "guest",
+      "label": "Guest",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 678,
+          "line_end": 683,
+          "symbol": "pc_irq",
+          "tokens": [
+            "interrupt_status &=",
+            "VIRTIO_CONSOLE_IRQ"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 226,
+          "line_end": 235,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "IOAPIC_REMOTE",
+            "ioapic_deliver"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 1249,
+          "line_end": 1251,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "exit.ApicEoi.InterruptVector"
+          ]
+        }
+      ],
+      "members": [
+        {
+          "target": "node:linux",
+          "states": [
+            "current"
+          ]
+        }
+      ],
+      "scope": "external"
+    }
+  ],
+  "edges": [
+    {
+      "id": "assert_line",
+      "label": "IRQ 5",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 550,
+          "line_end": 589,
+          "symbol": "console_transmit",
+          "tokens": [
+            "VIRTQ_AVAIL_F_NO_INTERRUPT",
+            "VIRTIO_CONSOLE_IRQ",
+            "interrupt_status |= 1"
+          ]
+        }
+      ],
+      "from": "console",
+      "to": "ioapic",
+      "kind": "data"
+    },
+    {
+      "id": "inject_vector",
+      "label": "0x45",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 897,
+          "line_end": 906,
+          "symbol": "interrupt",
+          "tokens": [
+            "WHvRequestInterrupt",
+            "request.Vector",
+            "request.TriggerMode"
+          ]
+        }
+      ],
+      "from": "ioapic",
+      "to": "local_apic",
+      "kind": "data"
+    },
+    {
+      "id": "deliver",
+      "label": "IRQ",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 897,
+          "line_end": 906,
+          "symbol": "interrupt",
+          "tokens": [
+            "WHvRequestInterrupt",
+            "request.Vector",
+            "request.TriggerMode"
+          ]
+        }
+      ],
+      "from": "local_apic",
+      "to": "linux",
+      "kind": "data"
+    },
+    {
+      "id": "device_ack",
+      "label": "InterruptACK lowers IRQ 5",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 678,
+          "line_end": 683,
+          "symbol": "pc_irq",
+          "tokens": [
+            "interrupt_status &=",
+            "VIRTIO_CONSOLE_IRQ"
+          ]
+        }
+      ],
+      "from": "linux",
+      "to": "console",
+      "kind": "data"
+    },
+    {
+      "id": "lapic_eoi",
+      "label": "LAPIC EOI",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 226,
+          "line_end": 235,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "IOAPIC_REMOTE",
+            "ioapic_deliver"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 1249,
+          "line_end": 1251,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "exit.ApicEoi.InterruptVector"
+          ]
+        }
+      ],
+      "from": "linux",
+      "to": "local_apic",
+      "kind": "data"
+    },
+    {
+      "id": "rearm",
+      "label": "EOI exit: rearm pin",
+      "states": [
+        "current"
+      ],
+      "views": [
+        "architecture"
+      ],
+      "proposed": false,
+      "evidence": [
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 226,
+          "line_end": 235,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "IOAPIC_REMOTE",
+            "ioapic_deliver"
+          ]
+        },
+        {
+          "type": "source",
+          "state": "current",
+          "revision": "WORKTREE",
+          "path": "windows-x86_64/vmmlite.c",
+          "line_start": 1249,
+          "line_end": 1251,
+          "symbol": "pc_eoi",
+          "tokens": [
+            "exit.ApicEoi.InterruptVector"
+          ]
+        }
+      ],
+      "from": "local_apic",
+      "to": "ioapic",
+      "kind": "data"
+    }
+  ],
+  "annotations": []
+}

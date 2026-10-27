@@ -8,7 +8,7 @@
 //   +-- dev/                                 the kernel's built-in initramfs
 //       +-- console                          fds 0, 1, 2: the console, hvc0 (virtio)
 //
-//   write(1) -> tty -> hvc0 -> virtqueue 1 -> vmmlite's console thread -> fwrite()
+//   write(1) -> tty -> hvc0 -> virtqueue 1 -> vmmlite's console handler -> fwrite()
 
 #include <sys/reboot.h>
 #include <termios.h>

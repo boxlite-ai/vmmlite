@@ -1,0 +1,188 @@
+{
+  "canvas": {
+    "width": 1200,
+    "height": 900
+  },
+  "title": "Machine \u00b7 who supplies each part",
+  "alt": "The Windows process owns RAM and PC devices; WHP supplies VP 0, the local APIC and GPA mappings.",
+  "version": "WHP source 4b049e4d \u00b7 native boot pending",
+  "brand": "vmmlite",
+  "nodes": [
+    {
+      "id": "node:run",
+      "x": 70,
+      "y": 200,
+      "w": 420,
+      "h": 120,
+      "title": "VP run loop",
+      "sub": [
+        "Load Linux; run VP 0",
+        "Handle exits on this thread"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:devices",
+      "x": 70,
+      "y": 410,
+      "w": 420,
+      "h": 140,
+      "title": "PC devices + console",
+      "sub": [
+        "PIC / PIT / IOAPIC",
+        "COM1 / virtio \u2192 stdout"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:ram",
+      "x": 70,
+      "y": 640,
+      "w": 420,
+      "h": 100,
+      "title": "512 MiB RAM",
+      "sub": [
+        "Windows allocation"
+      ],
+      "role": "state",
+      "shape": "box"
+    },
+    {
+      "id": "node:vp",
+      "x": 710,
+      "y": 200,
+      "w": 420,
+      "h": 120,
+      "title": "Virtual processor 0",
+      "sub": [
+        "Executes Linux + /init",
+        "Retains guest registers"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:lapic",
+      "x": 710,
+      "y": 410,
+      "w": 420,
+      "h": 140,
+      "title": "Local APIC + timer",
+      "sub": [
+        "xAPIC emulation",
+        "Delivers CPU vectors"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:mapping",
+      "x": 710,
+      "y": 640,
+      "w": 420,
+      "h": 100,
+      "title": "GPA mappings",
+      "sub": [
+        "Guest addresses \u2192 host pages"
+      ],
+      "role": "state",
+      "shape": "box"
+    }
+  ],
+  "zones": [
+    {
+      "id": "boundary:process",
+      "x": 40,
+      "y": 110,
+      "w": 480,
+      "h": 665,
+      "title": "vmmlite.exe",
+      "role": "execution"
+    },
+    {
+      "id": "boundary:engine",
+      "x": 680,
+      "y": 110,
+      "w": 480,
+      "h": 665,
+      "title": "WHP + hypervisor",
+      "role": "compute"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:run_vp",
+      "points": [
+        [
+          490,
+          260
+        ],
+        [
+          710,
+          260
+        ]
+      ],
+      "at": [
+        600,
+        260
+      ],
+      "label": [
+        "run / exit"
+      ]
+    },
+    {
+      "id": "edge:request_irq",
+      "points": [
+        [
+          490,
+          480
+        ],
+        [
+          710,
+          480
+        ]
+      ],
+      "at": [
+        600,
+        480
+      ],
+      "label": [
+        "vectors"
+      ]
+    },
+    {
+      "id": "edge:map_ram",
+      "points": [
+        [
+          490,
+          690
+        ],
+        [
+          710,
+          690
+        ]
+      ],
+      "at": [
+        600,
+        690
+      ],
+      "label": [
+        "map RAM"
+      ]
+    }
+  ],
+  "key": {
+    "x": 40,
+    "y": 795,
+    "columns": 4,
+    "roles": [
+      "execution",
+      "compute",
+      "state"
+    ],
+    "shapes": [],
+    "lines": []
+  }
+}

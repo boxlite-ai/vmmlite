@@ -1,0 +1,163 @@
+{
+  "canvas": {
+    "width": 1200,
+    "height": 850
+  },
+  "title": "Firecracker \u00b7 threads and device backends",
+  "alt": "Firecracker separates API, VMM and vCPU threads. The VMM uses host device backends; vCPU threads enter KVM.",
+  "version": "Firecracker 6ec2714 \u00b7 design.md",
+  "brand": "vmmlite",
+  "nodes": [
+    {
+      "id": "node:fc_api",
+      "x": 70,
+      "y": 210,
+      "w": 280,
+      "h": 110,
+      "title": "API thread",
+      "sub": [
+        "Configure the VM"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:fc_vmm",
+      "x": 460,
+      "y": 210,
+      "w": 280,
+      "h": 110,
+      "title": "VMM thread",
+      "sub": [
+        "epoll + device model"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:fc_vcpu",
+      "x": 850,
+      "y": 210,
+      "w": 280,
+      "h": 110,
+      "title": "vCPU threads",
+      "sub": [
+        "KVM_RUN; sync I/O"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:host_backing",
+      "x": 460,
+      "y": 560,
+      "w": 280,
+      "h": 130,
+      "title": "Host backends",
+      "sub": [
+        "TAP network",
+        "Block backing files"
+      ],
+      "role": "state",
+      "shape": "box"
+    },
+    {
+      "id": "node:kvm",
+      "x": 850,
+      "y": 560,
+      "w": 280,
+      "h": 130,
+      "title": "KVM",
+      "sub": [
+        "Executes guest CPUs"
+      ],
+      "role": "compute",
+      "shape": "box"
+    }
+  ],
+  "zones": [
+    {
+      "id": "boundary:fc_process",
+      "x": 40,
+      "y": 120,
+      "w": 1120,
+      "h": 280,
+      "title": "Firecracker process",
+      "role": "execution"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:config",
+      "points": [
+        [
+          350,
+          265
+        ],
+        [
+          460,
+          265
+        ]
+      ],
+      "at": [
+        405,
+        265
+      ],
+      "label": [
+        "config"
+      ]
+    },
+    {
+      "id": "edge:vm_io",
+      "points": [
+        [
+          600,
+          320
+        ],
+        [
+          600,
+          560
+        ]
+      ],
+      "at": [
+        600,
+        470
+      ],
+      "label": [
+        "device I/O"
+      ]
+    },
+    {
+      "id": "edge:kvm_run",
+      "points": [
+        [
+          990,
+          320
+        ],
+        [
+          990,
+          560
+        ]
+      ],
+      "at": [
+        990,
+        470
+      ],
+      "label": [
+        "KVM_RUN"
+      ]
+    }
+  ],
+  "key": {
+    "x": 40,
+    "y": 745,
+    "columns": 4,
+    "roles": [
+      "execution",
+      "state",
+      "compute"
+    ],
+    "shapes": [],
+    "lines": []
+  }
+}

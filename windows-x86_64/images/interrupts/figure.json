@@ -1,0 +1,253 @@
+{
+  "canvas": {
+    "width": 1200,
+    "height": 900
+  },
+  "title": "Interrupts \u00b7 one level-triggered example",
+  "alt": "Illustrative vector 0x45: IRQ 5 reaches the WHP local APIC, Linux acknowledges the device, then EOI lets vmmlite rearm the IOAPIC pin.",
+  "version": "WHP source 4b049e4d \u00b7 native boot pending",
+  "brand": "vmmlite",
+  "nodes": [
+    {
+      "id": "node:console",
+      "x": 70,
+      "y": 160,
+      "w": 300,
+      "h": 110,
+      "title": "Virtio console",
+      "sub": [
+        "TX used ring published",
+        "Notification enabled"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:ioapic",
+      "x": 70,
+      "y": 430,
+      "w": 300,
+      "h": 110,
+      "title": "IOAPIC pin 5",
+      "sub": [
+        "Level route",
+        "Vector 0x45"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:local_apic",
+      "x": 450,
+      "y": 430,
+      "w": 300,
+      "h": 110,
+      "title": "Local APIC",
+      "sub": [
+        "Vector 0x45"
+      ],
+      "role": "execution",
+      "shape": "box"
+    },
+    {
+      "id": "node:linux",
+      "x": 830,
+      "y": 430,
+      "w": 300,
+      "h": 110,
+      "title": "Linux IRQ handler",
+      "sub": [
+        "Device ACK; then EOI"
+      ],
+      "role": "execution",
+      "shape": "box"
+    }
+  ],
+  "zones": [
+    {
+      "id": "boundary:device_process",
+      "x": 40,
+      "y": 100,
+      "w": 360,
+      "h": 490,
+      "title": "vmmlite.exe",
+      "role": "execution"
+    },
+    {
+      "id": "boundary:interrupt_engine",
+      "x": 420,
+      "y": 350,
+      "w": 360,
+      "h": 240,
+      "title": "WHP",
+      "role": "compute"
+    },
+    {
+      "id": "boundary:guest",
+      "x": 800,
+      "y": 350,
+      "w": 360,
+      "h": 240,
+      "title": "Guest",
+      "role": "external"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:assert_line",
+      "points": [
+        [
+          220,
+          270
+        ],
+        [
+          220,
+          430
+        ]
+      ],
+      "at": [
+        220,
+        350
+      ],
+      "label": [
+        "IRQ 5"
+      ]
+    },
+    {
+      "id": "edge:inject_vector",
+      "points": [
+        [
+          370,
+          485
+        ],
+        [
+          450,
+          485
+        ]
+      ],
+      "at": [
+        410,
+        485
+      ],
+      "label": [
+        "0x45"
+      ]
+    },
+    {
+      "id": "edge:deliver",
+      "points": [
+        [
+          750,
+          485
+        ],
+        [
+          830,
+          485
+        ]
+      ],
+      "at": [
+        790,
+        485
+      ],
+      "label": [
+        "IRQ"
+      ]
+    },
+    {
+      "id": "edge:device_ack",
+      "points": [
+        [
+          1130,
+          485
+        ],
+        [
+          1180,
+          485
+        ],
+        [
+          1180,
+          215
+        ],
+        [
+          370,
+          215
+        ]
+      ],
+      "at": [
+        750,
+        215
+      ],
+      "label": [
+        "InterruptACK lowers IRQ 5"
+      ]
+    },
+    {
+      "id": "edge:lapic_eoi",
+      "points": [
+        [
+          980,
+          540
+        ],
+        [
+          980,
+          650
+        ],
+        [
+          650,
+          650
+        ],
+        [
+          650,
+          540
+        ]
+      ],
+      "at": [
+        820,
+        650
+      ],
+      "label": [
+        "LAPIC EOI"
+      ]
+    },
+    {
+      "id": "edge:rearm",
+      "points": [
+        [
+          550,
+          540
+        ],
+        [
+          550,
+          740
+        ],
+        [
+          220,
+          740
+        ],
+        [
+          220,
+          540
+        ]
+      ],
+      "at": [
+        385,
+        740
+      ],
+      "label": [
+        "EOI exit: rearm pin"
+      ]
+    }
+  ],
+  "key": {
+    "x": 40,
+    "y": 795,
+    "columns": 4,
+    "roles": [
+      "execution",
+      "compute",
+      "external"
+    ],
+    "shapes": [],
+    "lines": []
+  }
+}
