@@ -83,6 +83,11 @@ Before `main()` come the two devices:
   virtio console at 0x0a000000. Queue 1 prints and returns buffers; receive setup and kicks
   are ignored, as in the Linux example. This is intentionally not full virtio conformance.
 
+Follow one output buffer in the source: Linux publishes a descriptor head in the available
+ring, writes queue number 1 to `QUEUE_NOTIFY`, and `console_kick()` prints the bytes.
+The VMM publishes a used-ring entry before raising INTID 33; Linux then reclaims the
+buffer. The register tables and diagrams next to each helper describe this same path.
+
 macOS has no KVM ioeventfd/irqfd path. Each notify exits to this process, which handles it
 while the sole vCPU is stopped, then raises a GIC SPI. A worker would add synchronization
 without removing that exit. GIC delivery and ARM timer handling stay in the framework.
