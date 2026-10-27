@@ -53,8 +53,9 @@ static void require(int ok, const char *why) {
 #define FDT(call) do { int r = (call); if (r < 0) { \
   fprintf(stderr, "%s: %s\n", #call, fdt_strerror(r)); exit(1); } } while (0)
 
-// Translate a guest physical range to this process. Subtract before comparing so an address
-// near UINT64_MAX cannot wrap into RAM. Devices and gaps are not part of this mapping.
+// Guest physical address -> offset from RAM_BASE -> host pointer
+//   0x40001000           -> 0x1000                -> ram + 0x1000
+// Check the whole range by subtraction to avoid overflow. Devices and gaps are not RAM.
 static void *guest(uint64_t address, size_t size) {
   require(address >= RAM_BASE && size <= RAM_SIZE &&
           address - RAM_BASE <= RAM_SIZE - size, "guest address outside RAM");
@@ -84,9 +85,9 @@ static size_t load(const char *path, void *destination, size_t capacity) {
 //   24            flags         bit 0: big endian; this example accepts little endian only
 //   56            magic         41 52 4d 64: "ARM" followed by byte 0x64
 //
-// load() put the file at ram temporarily; memmove() places it at ram + text_offset.
-// The pinned test Image uses text_offset 0; read the header rather than assuming a value.
-// The reserved extent must end before the DTB at 0x48000000. Linux builds its own page tables.
+//   file -> ram (temporary) -> memmove to ram + text_offset (final)
+//   PC = RAM_BASE + text_offset; the pinned test Image uses offset 0.
+// The whole image_size extent must fit before the DTB; Linux builds its own page tables.
 
 static uint64_t kernel_entry(size_t file_size) {
   uint64_t offset, image_size, flags;
@@ -109,11 +110,10 @@ static uint64_t kernel_entry(size_t file_size) {
 //   3 LCR    saved LCR                             LCR; DLAB selects the baud divisor
 //   5 LSR    TEMT | THRE: transmitter empty        ignored
 //
-// DLAB makes registers 0 and 1 the baud divisor. Those writes must not print or change IER.
-// INTID 32 is high while THRI is enabled and an empty event waits; reading IIR acknowledges
-// that event. The device tree says SPI 0, level high: 32 + 0 is the same INTID 32.
-// Earlycon polls LSR and writes TX. Later the 8250 driver discovers this UART as ttyS0,
-// but console=hvc0 selects the virtio console for the rest of the boot and for PID 1.
+// DLAB=1: registers 0/1 select baud-divisor bytes; writes do not print or change IER.
+//   TX-empty event + IER.THRI -> INTID 32 high -> read IIR -> clear event, lower INTID 32
+//   DT SPI 0 -> INTID 32 (32 + 0); the 8250 driver discovers this UART as ttyS0.
+//   earlycon polls UART -> hvc0 registers -> virtio carries later logs and PID 1 output.
 
 static unsigned char com1(int reg, int is_out, unsigned char byte) {
   static unsigned char ier, lcr, thr_empty;
@@ -148,9 +148,8 @@ static unsigned char com1(int reg, int is_out, unsigned char byte) {
 //   see used buffers <------------------------------------------- writes to shared RAM
 //   take IRQ         <----------  framework GIC         <--------- hv_gic_set_spi(33, true)
 //
-// KVM can route the kick to an eventfd and wake a worker without returning to its VMM.
-// Here the exit already stops the sole vCPU; do the tiny amount of work inline. There is no
-// worker, eventfd, mutex or concurrent guest writer while console_kick() walks the queue.
+//   KVM sibling: kick -> eventfd -> worker; here: kick -> VM exit -> inline queue work.
+// With one stopped vCPU and no worker, the guest cannot change buffers during console_kick().
 //
 // The IRQ must agree in two places:
 //   machine.dts: interrupts = <0 1 4>     type 0 = SPI, number 1, flags 4 = level high
@@ -178,19 +177,16 @@ static void queue_check(struct queue *q) {
   guest(q->desc, 16 * q->size); guest(q->avail, 6 + 2 * q->size); guest(q->used, 6 + 8 * q->size);
 }
 
-// The data path. A kick says "look at the available ring", not "print the doorbell value".
+// One output chain. QUEUE_NOTIFY carries a queue number, not the bytes to print.
 //
-//   Linux                       guest RAM                      vmmlite
-//   fills a descriptor  ------> desc[head] {address,len,...} --> reads each buffer, fwrite()
-//   publishes its head  ------> avail.ring[idx % size]
-//   bumps avail.idx     ------> avail.idx                 ---> compares with q->next
-//   writes QUEUE_NOTIFY ------> MMIO exit                  ---> this function
-//   reclaims its buffer <------ used.ring[idx % size]      <--- {head, 0}: no bytes written
-//                               used.idx                  <--- release store, then raise IRQ
+//   Linux:   data -> desc[head] -> avail.ring[slot] -> avail.idx++ -> QUEUE_NOTIFY=1
+//   vmmlite: follow NEXT -> fwrite(data) -> used.ring[slot] = {head, 0}
+//                                      -> publish used.idx (release, per chain)
+//   after draining: INTID 33 high -> Linux reads used ring -> reclaims buffers
 //
-// uint16_t indices wrap at 65536; ring slots wrap at queue size. They are different counters.
-// Bound the chain walk as well as each address, so malformed NEXT links cannot loop forever.
-// Publishing the completion before used.idx keeps the entry visible when Linux resumes.
+// Completion length is 0: output reads guest bytes; it writes none back to those buffers.
+// uint16_t indices wrap at 65536; ring slots wrap at queue size. Bound every address and
+// NEXT chain. Publish the completion before used.idx so Linux sees it when it resumes.
 static void console_kick(uint32_t number) {
   if (number != 1) return;                 // No host input is offered on queue 0.
   struct queue *q = &console.transmit;
@@ -248,6 +244,8 @@ static void console_kick(uint32_t number) {
 //   STATUS: 0, 1, 3, 0xb, 0xf. Only bit 32 is offered; no packed rings or indirect descriptors.
 //   Queue 0 setup is ignored, deliberately matching the Linux learning example; no input comes.
 //   Queue 1 retains its addresses. Changing them while ready is ignored; STATUS 0 resets them.
+//   used buffers -> INTERRUPT_STATUS bit 0 -> INTID 33 high
+//   Linux writes INTERRUPT_ACK=1 -> clear bit 0 -> INTID 33 low
 // This is enough for the example's output path, not a complete virtio device implementation.
 static uint32_t console_register_read(unsigned reg) {
   struct queue *q = console.selected == 1 ? &console.transmit : NULL;
@@ -301,8 +299,8 @@ static void console_register_write(unsigned reg, uint32_t value) {
   }
 }
 
-// The machine description, completed in section 5. dtc compiles machine.dts into a DTB;
-// libfdt updates properties without relying on where their bytes happen to sit in that blob.
+// The DTB describes hardware; the framework and device helpers implement it.
+//   machine.dts --dtc--> DTB --load + libfdt patch--> guest RAM <-- x0 at kernel entry
 //
 //   node/property             value                         Linux learns
 //   /chosen/bootargs          earlycon=... console=hvc0 ... which consoles to use
@@ -352,9 +350,10 @@ static void prepare_dtb(void *dtb, size_t size, size_t initrd_size) {
 //   8, 7         CM,S1PTW reject cache-maintenance/page-table-walk aborts here
 //   6            WnR     1 = store, 0 = load
 //
-// A store reads Xn, dispatches it; a load dispatches first, then writes Xn/Wn. Register 31
-// reads as zero and discards a load. Advance PC by 4 after completing this ARM64 instruction.
-// GIC register accesses do not reach this helper: the framework already handles that device.
+//   store: Xn (or 0 for register 31) -> device helper
+//   load:  device helper -> extend result -> Xn/Wn (discard for register 31)
+//   both:  PC += 4 -> resume Linux
+// GIC accesses stay in the framework; only UART/virtio reach these helpers.
 
 static void mmio(hv_vcpu_t cpu, hv_vcpu_exit_t *vcpu_exit) {
   uint64_t esr = vcpu_exit->exception.syndrome, address = vcpu_exit->exception.physical_address;
@@ -389,8 +388,8 @@ int main(int argc, char **argv) {
   //   hv_vm_create -> hv_gic_create -> hv_vcpu_create (section 6)
   //   distributor at 0x08000000, redistributor at 0x10000000; sizes are queried in section 5.
   //
-  // The framework supplies interrupt routing and timers, like KVM's in-kernel controllers.
-  // Do not map RAM over either GIC region. os_release drops only the configuration object.
+  // The framework implements the GIC; we choose its addresses, then create it for this VM.
+  // Leave GIC ranges out of RAM mappings. os_release drops the configuration, not the GIC.
   HV(hv_vm_create(NULL));
   hv_gic_config_t gic = hv_gic_config_create();
   require(gic != NULL, "allocating GIC configuration failed");
@@ -401,9 +400,10 @@ int main(int argc, char **argv) {
   // ------------------------------------------------------------------------------------------
   // 2. 512 MiB of host memory as guest RAM. Device addresses have no RAM backing.
   //
-  //   guest physical X -> framework stage-2 mapping -> the host page behind ram + (X - RAM_BASE)
-  //   guest RAM: [0x40000000, 0x60000000). mmap supplies zero-filled host pages.
-  //   The guest's own page tables add the first translation later: virtual -> guest physical.
+  //   guest virtual --Linux tables--> guest physical --framework stage 2--> host RAM
+  //   host pointer for guest address X: ram + (X - RAM_BASE).
+  // At entry the guest MMU is off: start at the guest-physical step above.
+  // mmap supplies zero-filled RAM for [0x40000000, 0x60000000).
   ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
   require(ram != MAP_FAILED, "allocating RAM failed");
   HV(hv_vm_map(ram, RAM_BASE, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
@@ -474,10 +474,7 @@ int main(int argc, char **argv) {
   //   0x16           HVC, the PSCI firmware interface     answer in x0; PC already advanced
   //   other          unsupported exception               report ESR/address and stop
   //
-  // PSCI IDs: 0x84000000 = VERSION, 0x84000008 = SYSTEM_OFF, 0x84000009 = SYSTEM_RESET.
-  // VERSION returns 2, meaning version 0.2; AFFINITY_INFO says our one CPU is on.
-  // Unknown calls return -1 (NOT_SUPPORTED). No second CPU, suspend or CPU hotplug.
-  // Linux's reboot(RB_AUTOBOOT) eventually issues SYSTEM_RESET; this is our exit-0 path.
+  // Linux reboot -> PSCI SYSTEM_RESET -> leave loop -> destroy VM and exit 0.
   for (;;) {
     HV(hv_vcpu_run(cpu));
     require(vcpu_exit->reason == HV_EXIT_REASON_EXCEPTION, "unexpected hypervisor exit");
