@@ -484,7 +484,19 @@ int main(int argc, char **argv) {
     unsigned ec = (vcpu_exit->exception.syndrome >> 26) & 63;
     if (ec == 0x24) mmio(cpu, vcpu_exit);
     else if (ec == 0x18) {
-      // No OS debug locks: OSLAR/OSDLR writes are ignored; OSLSR reads zero.
+      // Debug registers configure breakpoints (code addresses) and watchpoints
+      // (memory accesses). OS locks protect this state during save/restore;
+      // OSDLR adds protection around CPU power-down.
+      //
+      // Linux CPU startup, even without a debugger:
+      //   unlock controls -> reset unused breakpoints/watchpoints -> ready
+      //   Unlocking permits setup; it does not activate a breakpoint.
+      //
+      //   Linux access                 vmmlite: no guest locks
+      //   OSLAR/OSDLR write ---------> ignore
+      //   OSLSR read ----------------> return 0
+      //
+      // After either: PC += 4 -> resume Linux, without repeating the instruction.
       uint64_t syndrome = vcpu_exit->exception.syndrome, pc;
       unsigned access = syndrome & 0x3ffc1f, rt = (syndrome >> 5) & 31;
       require(access == 0x280400 || access == 0x280406 || access == 0x280403,
@@ -492,7 +504,16 @@ int main(int argc, char **argv) {
       if ((access & 1) && rt != 31) HV(hv_vcpu_set_reg(cpu, (hv_reg_t)(HV_REG_X0 + rt), 0));
       HV(hv_vcpu_get_reg(cpu, HV_REG_PC, &pc)); HV(hv_vcpu_set_reg(cpu, HV_REG_PC, pc + 4));
     }
-    else if (ec == 0x16) {                 // HVC: the framework already advanced PC.
+    else if (ec == 0x16) {
+      // HVC calls firmware services; it does not enable a guest hypervisor.
+      //
+      //   Linux: x0 = PSCI request --HVC--> vmmlite
+      //                                     |-- OFF/RESET -----> stop this VM run
+      //                                     |-- VERSION -------> x0 = 2  (v0.2)
+      //                                     |-- AFFINITY_INFO -> x0 = 0  (CPU on)
+      //                                     `-- other ---------> x0 = -1 (unsupported)
+      //
+      // Reply paths resume Linux. The framework already advanced PC past HVC.
       uint64_t function, result = UINT64_MAX;
       HV(hv_vcpu_get_reg(cpu, HV_REG_X0, &function));
       if (function == 0x84000008 || function == 0x84000009) break; // PSCI SYSTEM_OFF/RESET
