@@ -21,10 +21,13 @@ def boot(initramfs, log_name, greeting):
     output = (result.stdout + result.stderr).decode(errors='replace')
     (build / log_name).write_text(output)
     assert result.returncode == 0, output[-5000:]
-    for marker in ('Linux version', 'console [hvc0] enabled', 'Run /init as init process',
+    for marker in ('Linux version', 'ttyS0 at MMIO 0x9000000', 'console [hvc0] enabled', 'Run /init as init process',
                    greeting, 'guest requested PSCI shutdown/reset'):
         assert marker in output, f'Missing {marker!r}:\n{output[-5000:]}'
     assert 'Kernel panic' not in output, output[-5000:]
+    assert output.count(greeting) == 1, 'Guest greeting duplicated'
+    assert output.index('bootconsole [uart8250] enabled') < output.index('console [hvc0] enabled')
+    assert output.index('bootconsole [uart8250] disabled') < output.index(greeting)
     return output
 
 

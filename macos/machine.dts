@@ -29,6 +29,12 @@
         interrupts = <1 13 4>, <1 14 4>, <1 11 4>, <1 10 4>;
     };
     psci { compatible = "arm,psci-0.2"; method = "hvc"; };
+    serial@9000000 {
+        compatible = "ns8250";
+        reg = <0 0x09000000 0 8>;
+        clock-frequency = <1843200>;
+        interrupts = <0 0 4>; // SPI 0 is interrupt ID 32, level high.
+    };
     virtio_mmio@a000000 {
         compatible = "virtio,mmio";
         reg = <0 0x0a000000 0 0x1000>;

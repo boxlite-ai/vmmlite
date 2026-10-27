@@ -1,8 +1,7 @@
-// One ARM64 Linux CPU on Hypervisor.framework. For learning, not untrusted guests.
-// The numbered sections match README.md. All guest addresses below are physical.
+// vmmlite.c: a tiny VMM that boots Linux (arm64, Hypervisor.framework). For learning only.
+// Build: make    Run: .build/vmmlite Image .build/initramfs.cpio .build/machine.dtb
 #include <Hypervisor/Hypervisor.h>
 #include <libfdt.h>
-#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,8 +19,18 @@
 #define CONSOLE_BASE UINT64_C(0x0a000000)
 #define GICD_BASE UINT64_C(0x08000000)
 #define GICR_BASE UINT64_C(0x10000000)
+#define UART_IRQ 32
 #define CONSOLE_IRQ 33
 #define QUEUE_MAX 256
+enum { UART_TX = 0, UART_IER = 1, UART_IIR = 2, UART_LCR = 3, UART_LSR = 5,
+       UART_IER_THRI = 2, UART_IIR_NO_INT = 1, UART_IIR_THRI = 2,
+       UART_LCR_DLAB = 128, UART_LSR_TEMT = 64, UART_LSR_THRE = 32 };
+enum { MAGIC_VALUE = 0x000, VERSION = 0x004, DEVICE_ID = 0x008,
+       DEVICE_FEATURES = 0x010, DEVICE_FEATURES_SEL = 0x014,
+       DRIVER_FEATURES = 0x020, DRIVER_FEATURES_SEL = 0x024,
+       QUEUE_SEL = 0x030, QUEUE_NUM_MAX = 0x034, QUEUE_NUM = 0x038, QUEUE_READY = 0x044,
+       QUEUE_NOTIFY = 0x050, INTERRUPT_STATUS = 0x060, INTERRUPT_ACK = 0x064,
+       STATUS = 0x070, QUEUE_DESC_LOW = 0x080, QUEUE_AVAIL_LOW = 0x090, QUEUE_USED_LOW = 0x0a0 };
 
 static unsigned char *ram;
 static void require(int ok, const char *why) {
@@ -50,7 +59,7 @@ static size_t load(const char *path, void *destination, size_t capacity) {
   return size;
 }
 
-// 1. Linux Image header: little-endian text_offset, image_size, flags, ARM64 magic.
+// Linux Image header: little-endian text_offset, image_size, flags, ARM64 magic.
 static uint64_t kernel_entry(size_t file_size) {
   uint64_t offset, image_size, flags;
   require(file_size >= 64 && !memcmp(ram + 56, "ARM\x64", 4), "expected an uncompressed ARM64 Image");
@@ -62,10 +71,30 @@ static uint64_t kernel_entry(size_t file_size) {
   return RAM_BASE + offset;
 }
 
-// 2. A modern virtio-mmio console. Queue 0 receives; queue 1 transmits.
+// The same transmit-only 8250 register subset as the KVM example, reached through MMIO.
+static unsigned char com1(int reg, int is_out, unsigned char byte) {
+  static unsigned char ier, lcr, thr_empty;
+  unsigned char reply = 0;
+  if (lcr & UART_LCR_DLAB && reg <= UART_IER) return 0;
+  if (is_out) {
+    if (reg == UART_TX) { require(putchar(byte) != EOF, "UART write failed"); thr_empty = 1; }
+    if (reg == UART_IER) { thr_empty |= byte & ~ier & UART_IER_THRI; ier = byte; }
+    if (reg == UART_LCR) lcr = byte;
+  } else {
+    if (reg == UART_IER) reply = ier;
+    if (reg == UART_IIR) reply = ier & UART_IER_THRI && thr_empty ? UART_IIR_THRI : UART_IIR_NO_INT;
+    if (reg == UART_IIR && reply == UART_IIR_THRI) thr_empty = 0;
+    if (reg == UART_LCR) reply = lcr;
+    if (reg == UART_LSR) reply = UART_LSR_TEMT | UART_LSR_THRE;
+  }
+  HV(hv_gic_set_spi(UART_IRQ, ier & UART_IER_THRI && thr_empty));
+  return reply;
+}
+
+// A modern virtio-mmio console. Only queue 1, output, needs backing state.
 struct queue { uint32_t size, ready; uint64_t desc, avail, used; uint16_t next; };
 static struct {
-  struct queue queues[2];
+  struct queue transmit;
   uint32_t selected, feature_page, driver_page, status, interrupt;
   uint64_t features;
 } console;
@@ -79,7 +108,7 @@ static void queue_check(struct queue *q) {
 
 static void console_kick(uint32_t number) {
   if (number != 1) return;                 // No host input is offered on queue 0.
-  struct queue *q = &console.queues[1];
+  struct queue *q = &console.transmit;
   require(q->ready && (console.status & 4), "transmit before DRIVER_OK/QueueReady");
   queue_check(q);
   uint16_t *avail = guest(q->avail, 6 + 2 * q->size);
@@ -106,38 +135,38 @@ static void console_kick(uint32_t number) {
   HV(hv_gic_set_spi(CONSOLE_IRQ, true));
 }
 
-static uint32_t console_read(unsigned reg) {
-  struct queue *q = console.selected < 2 ? &console.queues[console.selected] : NULL;
+static uint32_t console_register_read(unsigned reg) {
+  struct queue *q = console.selected == 1 ? &console.transmit : NULL;
   switch (reg) {
-  case 0x000: return 0x74726976;           // MagicValue: "virt"
-  case 0x004: return 2;                    // Version: modern MMIO
-  case 0x008: return 3;                    // DeviceID: console
-  case 0x010: return console.feature_page == 1 ? 1 : 0; // VIRTIO_F_VERSION_1, bit 32
-  case 0x034: return q ? QUEUE_MAX : 0;
-  case 0x044: return q ? q->ready : 0;
-  case 0x060: return console.interrupt;
-  case 0x070: return console.status;
+  case MAGIC_VALUE: return 0x74726976;           // MagicValue: "virt"
+  case VERSION: return 2;                    // Version: modern MMIO
+  case DEVICE_ID: return 3;                    // DeviceID: console
+  case DEVICE_FEATURES: return console.feature_page == 1 ? 1 : 0; // VIRTIO_F_VERSION_1, bit 32
+  case QUEUE_NUM_MAX: return console.selected < 2 ? QUEUE_MAX : 0;
+  case QUEUE_READY: return q ? q->ready : 0;
+  case INTERRUPT_STATUS: return console.interrupt;
+  case STATUS: return console.status;
   default: return 0;
   }
 }
 
-static void console_write(unsigned reg, uint32_t value) {
-  struct queue *q = console.selected < 2 ? &console.queues[console.selected] : NULL;
+static void console_register_write(unsigned reg, uint32_t value) {
+  struct queue *q = console.selected == 1 ? &console.transmit : NULL;
   switch (reg) {
-  case 0x014: console.feature_page = value; break;
-  case 0x024: console.driver_page = value; break;
-  case 0x020:
+  case DEVICE_FEATURES_SEL: console.feature_page = value; break;
+  case DRIVER_FEATURES_SEL: console.driver_page = value; break;
+  case DRIVER_FEATURES:
     if (console.driver_page < 2) {
       unsigned shift = 32 * console.driver_page;
       console.features = (console.features & ~(UINT64_C(0xffffffff) << shift)) | ((uint64_t)value << shift);
     }
     break;
-  case 0x030: console.selected = value; break;
-  case 0x050: console_kick(value); break;
-  case 0x064:
+  case QUEUE_SEL: console.selected = value; break;
+  case QUEUE_NOTIFY: console_kick(value); break;
+  case INTERRUPT_ACK:
     console.interrupt &= ~value;
     HV(hv_gic_set_spi(CONSOLE_IRQ, console.interrupt != 0)); break;
-  case 0x070:
+  case STATUS:
     if (!value) { memset(&console, 0, sizeof console); HV(hv_gic_set_spi(CONSOLE_IRQ, false)); }
     else {
       if ((value & 8) && console.features != (UINT64_C(1) << 32)) value &= ~8u;
@@ -145,20 +174,20 @@ static void console_write(unsigned reg, uint32_t value) {
       console.status = value;
     }
     break;
-  case 0x038: if (q && !q->ready) q->size = value; break;
-  case 0x044:
+  case QUEUE_NUM: if (q && !q->ready) q->size = value; break;
+  case QUEUE_READY:
     if (q) { require(value <= 1, "invalid QueueReady"); if (value) queue_check(q); q->ready = value; }
     break;
   default:
-    if (q && !q->ready && reg >= 0x080 && reg <= 0x0a4 && !(reg & 3)) {
-      uint64_t *address = reg < 0x090 ? &q->desc : reg < 0x0a0 ? &q->avail : &q->used;
+    if (q && !q->ready && reg >= QUEUE_DESC_LOW && reg <= QUEUE_USED_LOW + 4 && !(reg & 3)) {
+      uint64_t *address = reg < QUEUE_AVAIL_LOW ? &q->desc : reg < QUEUE_USED_LOW ? &q->avail : &q->used;
       if ((reg & 15) == 0) *address = (*address & UINT64_C(0xffffffff00000000)) | value;
       if ((reg & 15) == 4) *address = (*address & UINT64_C(0xffffffff)) | ((uint64_t)value << 32);
     }
   }
 }
 
-// 3. Patch variable properties in the readable DTS, using libfdt for bounds/layout.
+// Patch the readable DTS with this run's initramfs, GIC sizes and timer interrupt IDs.
 static void prepare_dtb(void *dtb, size_t size, size_t initrd_size) {
   FDT(fdt_check_full(dtb, size));
   FDT(fdt_open_into(dtb, dtb, DTB_SIZE));
@@ -179,7 +208,7 @@ static void prepare_dtb(void *dtb, size_t size, size_t initrd_size) {
   FDT(fdt_pack(dtb));
 }
 
-// 4. An MMIO data abort describes the faulting load/store in ESR_EL2's syndrome.
+// An MMIO data abort describes the faulting load/store in ESR_EL2's syndrome.
 static void mmio(hv_vcpu_t cpu, hv_vcpu_exit_t *vcpu_exit) {
   uint64_t esr = vcpu_exit->exception.syndrome, address = vcpu_exit->exception.physical_address;
   unsigned width = 1u << ((esr >> 22) & 3), rt = (esr >> 16) & 31;
@@ -188,15 +217,13 @@ static void mmio(hv_vcpu_t cpu, hv_vcpu_exit_t *vcpu_exit) {
   uint64_t value = 0, pc;
   if (write && rt != 31) HV(hv_vcpu_get_reg(cpu, (hv_reg_t)(HV_REG_X0 + rt), &value));
   if (address >= UART_BASE && address < UART_BASE + 8) {
-    unsigned reg = address - UART_BASE;
     require(width == 1, "UART needs byte accesses");
-    if (write && reg == 0) require(putchar(value & 255) != EOF, "UART write failed");
-    value = reg == 5 ? 0x60 : 0;           // 16550 LSR: transmitter and holding register empty.
+    value = com1(address - UART_BASE, write, value);
   } else {
     require(address >= CONSOLE_BASE && address < CONSOLE_BASE + 0x1000 &&
             width == 4 && !(address & 3), "unhandled MMIO address/width");
     unsigned reg = address - CONSOLE_BASE;
-    if (write) console_write(reg, value); else value = console_read(reg);
+    if (write) console_register_write(reg, value); else value = console_register_read(reg);
   }
   if (!write && rt != 31) {
     if (esr & (1u << 21)) value = (uint64_t)((int64_t)(value << (64 - width * 8)) >> (64 - width * 8));
@@ -209,33 +236,42 @@ static void mmio(hv_vcpu_t cpu, hv_vcpu_exit_t *vcpu_exit) {
 int main(int argc, char **argv) {
   require(argc == 4, "usage: vmmlite Image initramfs.cpio machine.dtb");
   setbuf(stdout, NULL);
-  ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-  require(ram != MAP_FAILED, "allocating RAM failed");
-  uint64_t entry = kernel_entry(load(argv[1], ram, DTB_BASE - RAM_BASE));
-  size_t initrd_size = load(argv[2], guest(INITRD_BASE, 1), RAM_BASE + RAM_SIZE - INITRD_BASE);
-  void *dtb = guest(DTB_BASE, DTB_SIZE);
-  size_t dtb_size = load(argv[3], dtb, DTB_SIZE);
-
-  // 5. Create the VM and GIC before the vCPU; MMIO regions deliberately have no RAM backing.
+  // 1. A VM and its GIC; Apple requires both before creating any vCPU.
   HV(hv_vm_create(NULL));
-  HV(hv_vm_map(ram, RAM_BASE, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
   hv_gic_config_t gic = hv_gic_config_create();
   require(gic != NULL, "allocating GIC configuration failed");
   HV(hv_gic_config_set_distributor_base(gic, GICD_BASE));
   HV(hv_gic_config_set_redistributor_base(gic, GICR_BASE));
   HV(hv_gic_create(gic)); os_release(gic);
+
+  // 2. 512 MiB of host memory as guest RAM. Device addresses have no RAM backing.
+  ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  require(ram != MAP_FAILED, "allocating RAM failed");
+  HV(hv_vm_map(ram, RAM_BASE, RAM_SIZE, HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC));
+
+  // 3. The uncompressed Linux Image, at the offset its header requests.
+  uint64_t entry = kernel_entry(load(argv[1], ram, DTB_BASE - RAM_BASE));
+
+  // 4. The initramfs and device tree; /chosen in the tree carries the command line.
+  size_t initrd_size = load(argv[2], guest(INITRD_BASE, 1), RAM_BASE + RAM_SIZE - INITRD_BASE);
+  void *dtb = guest(DTB_BASE, DTB_SIZE);
+  size_t dtb_size = load(argv[3], dtb, DTB_SIZE);
+
+  // 5. Finish the machine description: initramfs extent, GIC regions and timer PPIs.
   prepare_dtb(dtb, dtb_size, initrd_size);
 
-  // 6. The ARM64 boot protocol: EL1h, DAIF masked, MMU off, x0 = DTB, x1-x3 = 0.
+  // 6. One vCPU, affinity 0: the same CPU that /cpus/cpu@0 describes.
   hv_vcpu_t cpu; hv_vcpu_exit_t *vcpu_exit;
   HV(hv_vcpu_create(&cpu, &vcpu_exit, NULL));
   HV(hv_vcpu_set_sys_reg(cpu, HV_SYS_REG_MPIDR_EL1, UINT64_C(0x80000000)));
+
+  // 7. The ARM64 boot protocol: EL1h, DAIF masked, MMU off, x0 = DTB, x1-x3 = 0.
   HV(hv_vcpu_set_sys_reg(cpu, HV_SYS_REG_SCTLR_EL1, 0x30d00800));
   HV(hv_vcpu_set_reg(cpu, HV_REG_CPSR, 0x3c5));
   HV(hv_vcpu_set_reg(cpu, HV_REG_PC, entry)); HV(hv_vcpu_set_reg(cpu, HV_REG_X0, DTB_BASE));
   for (hv_reg_t reg = HV_REG_X1; reg <= HV_REG_X3; reg++) HV(hv_vcpu_set_reg(cpu, reg, 0));
 
-  // 7. Native GIC/timers stay in the framework. MMIO and PSCI reach this loop.
+  // 8. Run. Device MMIO, OS debug locks and PSCI calls return to this loop.
   for (;;) {
     HV(hv_vcpu_run(cpu));
     require(vcpu_exit->reason == HV_EXIT_REASON_EXCEPTION, "unexpected hypervisor exit");
