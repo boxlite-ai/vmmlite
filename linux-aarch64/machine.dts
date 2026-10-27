@@ -5,7 +5,7 @@
     #size-cells = <2>;
     interrupt-parent = <&gic>;
     chosen {
-        bootargs = "earlycon=uart8250,mmio,0x09000000 console=ttyS0 panic=-1";
+        bootargs = "earlycon=uart8250,mmio,0x09000000 console=hvc0 panic=-1";
         linux,initrd-start = <0 0>;
         linux,initrd-end = <0 0>;
     };
@@ -34,5 +34,10 @@
         reg = <0 0x09000000 0 8>;
         clock-frequency = <1843200>;
         interrupts = <0 0 4>; // SPI 0 is interrupt ID 32, level high.
+    };
+    virtio_mmio@a000000 {
+        compatible = "virtio,mmio";
+        reg = <0 0x0a000000 0 0x1000>;
+        interrupts = <0 1 1>; // SPI 1 -> INTID 33; edge rising for non-resampling irqfd.
     };
 };

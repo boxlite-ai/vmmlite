@@ -1,4 +1,4 @@
-"""Run the actual KVM VMM and require Linux, ttyS0, PID 1, and PSCI completion."""
+"""Run the actual KVM VMM and require Linux, hvc0, PID 1, and PSCI completion."""
 from pathlib import Path
 import subprocess
 import sys
@@ -20,12 +20,12 @@ def boot(initramfs, log_name, greeting):
     output = (result.stdout + result.stderr).decode(errors='replace')
     (build / log_name).write_text(output)
     assert result.returncode == 0, output[-5000:]
-    for marker in ('Linux version', 'ttyS0 at MMIO 0x9000000', 'console [ttyS0] enabled', 'Run /init as init process',
+    for marker in ('Linux version', 'ttyS0 at MMIO 0x9000000', 'console [hvc0] enabled', 'Run /init as init process',
                    greeting, 'guest requested PSCI shutdown/reset'):
         assert marker in output, f'Missing {marker!r}:\n{output[-5000:]}'
     assert 'Kernel panic' not in output, output[-5000:]
     assert output.count(greeting) == 1, 'Guest greeting duplicated'
-    assert output.index('bootconsole [uart8250] enabled') < output.index('console [ttyS0] enabled')
+    assert output.index('bootconsole [uart8250] enabled') < output.index('console [hvc0] enabled')
     assert output.index('bootconsole [uart8250] disabled') < output.index(greeting)
     return output
 
@@ -61,4 +61,4 @@ with tempfile.TemporaryDirectory() as directory:
     bad_dtb.write_bytes(b'invalid device tree')
     result = subprocess.run([*command[:3], str(bad_dtb)], capture_output=True, timeout=5)
     assert result.returncode == 1 and b'FDT_ERR_' in result.stderr, result
-print('PASS: repeated Linux/ttyS0/PID 1 boots, timer wakeup, 300 console writes, malformed inputs')
+print('PASS: repeated Linux/hvc0/PID 1 boots, timer wakeup, 300 console writes, malformed inputs')
