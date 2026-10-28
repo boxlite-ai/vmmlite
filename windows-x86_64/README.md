@@ -148,6 +148,23 @@ A queue-1 notification produces 11 output bytes, one used-ring entry `{id: 0, le
 and an IRQ 5 request when interrupts are enabled. The completion length is zero because
 TX reads the guest's buffers. The comment above `console_transmit()` follows this path.
 
+Follow these examples in the source when the helper arithmetic becomes less obvious:
+
+| Helper | What the nearby comment explains |
+| --- | --- |
+| `pic_next()` | Pending IRQs 1 and 4 compete while IRQ 2 is in service: only IRQ 1 may preempt it. |
+| `ioapic_deliver()` | Lowering a device line and issuing a LAPIC EOI are separate events; their order determines whether a level interrupt is sent again. |
+| `pit_count()` / `pit_port()` | A mode-3 reload of 5 produces counts `5, 4, 2, 4, 2`; byte latches keep one count coherent across two port reads. |
+| `queue_valid()` / `console_transmit()` | Ring fields use byte offsets, counters wrap at 65,536, and a size-8 ring uses slots 7 then 0 across that wrap. |
+| `load_kernel()` | Rounding the initramfs start downward keeps its end below the address ceiling; the decompressor's full workspace must also fit below it. |
+| `timer_thread()` / `main()` cleanup | The timer only wakes the VP thread; shutdown joins it before deleting the VP and partition it borrows. |
+
+These are worked examples of the implementation, not captured Windows execution.
+The comments also mark caller contracts: boot-data helpers require the validated layout
+and initially zero-filled RAM, while the console's two-pass descriptor walk relies on
+the single VP being stopped. Adding another VP or an asynchronous device worker would
+require revisiting those ownership and ordering assumptions.
+
 ### Deliberate limits
 
 The PIT models binary modes 0, 2 and 3; other programming fails with a diagnostic.
