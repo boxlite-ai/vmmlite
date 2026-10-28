@@ -148,18 +148,18 @@ Before `main()` come the device and boot helpers:
   helper only wakes it with `WHvCancelRunVirtualProcessor`.
 
 [init.c](../init.c) stays at the repository root as shared guest code. It writes one
-line, drains the console, and requests reboot. The [walkthrough](tutorial.md) follows
-these same section numbers from CPU background to the full boot path.
+line, drains the console, and requests reboot.
 
 Start at `main()` for the boot sequence, then follow its helpers. The file groups
 guest-byte and file utilities, PC devices, virtio, boot data, initial CPU state,
 and WHP runtime callbacks. Named UART registers match the Linux and macOS examples;
 nearby tables explain reads, writes and interrupt effects.
 
-For a concrete queue example, the [walkthrough's two-buffer trace](tutorial.md#09-virtqueues-setup-then-data-through-shared-memory)
-uses the existing portable test: `"Hello "` plus `"WHP!\n"` becomes 11 output bytes,
-one used-ring entry `{0, 0}`, and an IRQ 5 request. This exercises the production
-device helpers without running Windows or guest instructions.
+For a concrete queue example, `virtio()` in [tests/machine_test.c](tests/machine_test.c)
+supplies `"Hello "` plus `"WHP!\n"` in two linked descriptors. A queue-1 notification
+produces 11 output bytes, one used-ring entry `{id: 0, len: 0}`, and an IRQ 5 request.
+The completion length is zero because TX reads the guest's buffers. This portable
+test exercises the production device helpers without running Windows or guest instructions.
 
 ### Deliberate limits
 
@@ -202,8 +202,8 @@ They cannot establish WHP register acceptance, timer delivery, or guest boot.
 
 ## Learn more
 
-- [The walkthrough](tutorial.md): machine diagrams, a Firecracker comparison, background, the boot sequence, code and verification
 - [The original Linux/KVM example](../linux-x86_64/README.md)
+- [The macOS/Apple Silicon companion](../macos/README.md)
 - [WHP API](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform) and [instruction emulator](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/hypervisor-instruction-emulator)
 - [Linux x86 boot protocol](https://docs.kernel.org/arch/x86/boot.html) and [virtio specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 - [Design and native acceptance](https://github.com/boxlite-ai/vmmlite/issues/13)
