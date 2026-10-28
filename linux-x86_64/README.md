@@ -1,15 +1,20 @@
+# vmmlite on Linux (x86_64)
+
+> [!WARNING]
+> **For learning only. Do not use vmmlite in production.** It skips what a production VMM needs: it
+> runs without a sandbox and models only a small boot machine. The x86 example does not validate
+> input files or guest addresses; the macOS example adds bounds checks but is not hardened. To run
+> code in a micro-VM, use a production VMM such as
+> Firecracker or Cloud Hypervisor, or a sandbox such as [BoxLite](https://github.com/boxlite-ai/boxlite).
+
 ## TL;DR
 
 390 lines of C, not counting comments, that boot a stock x86_64 Linux kernel on KVM to a PID 1 that
 prints one line through a virtio console and reboots.
 
-## Details
-
-> [!WARNING]
-> **For learning only. Do not use vmmlite in production.** It skips what a production VMM needs: it
-> does not validate its input files or guest addresses, runs without a sandbox, and emulates only a
-> serial port, a virtio console and a reset. To run code in a micro-VM, use a production VMM such as
-> Firecracker or Cloud Hypervisor, or a sandbox such as [BoxLite](https://github.com/boxlite-ai/boxlite).
+The [macOS / Apple Silicon companion](../macos/README.md) boots ARM64 Linux with
+Hypervisor.framework, a framework GICv3, and a modern virtio-MMIO console. Its walkthrough covers
+the device tree, ARM entry registers, interrupts, and the complete build and boot test.
 
 ## Run it
 
@@ -70,8 +75,8 @@ Before `main()` come the two devices:
   the guest through an irqfd. Firecracker, Cloud Hypervisor and libkrun wire their devices on KVM
   the same way.
 
-[init.c](../init.c) is PID 1. It stays at the repository root as shared guest code. It writes one
-line to the console, waits for the console to send it, and reboots.
+The shared [init.c](../init.c) is PID 1. It writes one line to the console, waits for the console
+to send it, and reboots.
 
 ## Tested on
 
