@@ -8,7 +8,7 @@
 //   +-- dev/                                 the kernel's built-in initramfs
 //       +-- console                          fds 0, 1, 2: the console, hvc0 (virtio)
 //
-//   write(1) -> tty -> hvc0 -> virtqueue 1 -> vmmlite's console thread -> fwrite()
+//   write(1) -> tty -> hvc0 -> virtqueue 1 -> vmmlite's console handler -> fwrite()
 
 #include <sys/reboot.h>
 #include <termios.h>
@@ -19,6 +19,6 @@ int main(void) {
   // stdout, fd 1: the console, hvc0
   if (write(STDOUT_FILENO, line, sizeof line - 1) < 0) return 1;
   tcdrain(STDOUT_FILENO);                                // wait until the console has sent it all
-  reboot(RB_AUTOBOOT);                                   // restart: Linux pulses the i8042
-                                                         //   reset line, and vmmlite exits
+  reboot(RB_AUTOBOOT);                                   // i8042 reset on x86, PSCI on ARM64;
+                                                         //   either ends vmmlite
 }
