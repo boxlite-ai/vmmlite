@@ -82,6 +82,9 @@ static inline void store32(uint8_t *p, uint32_t v) {
 static inline void store64(uint8_t *p, uint64_t v) {
   store32(p, (uint32_t)v); store32(p + 4, (uint32_t)(v >> 32));
 }
+// The requested bytes are [address, address + size). Check by subtraction so a large
+// guest address cannot wrap the end back into RAM. The first condition also prevents
+// subtraction underflow; address == ram.size is valid only for a zero-length range.
 static inline bool in_ram(struct memory ram, uint64_t address, uint64_t size) {
   return address <= ram.size && size <= ram.size - address;
 }
@@ -119,6 +122,9 @@ done:
   return success;
 }
 
+// Devices borrow these callbacks and context until destruction. Calls are synchronous
+// on the VP thread; output consumes host bytes, interrupt consumes an already-routed
+// CPU vector. Neither callback takes ownership of the supplied data.
 typedef bool (*output_fn)(void *context, const uint8_t *bytes, size_t size);
 typedef bool (*interrupt_fn)(void *context, unsigned vector, unsigned destination,
                              unsigned delivery, bool logical, bool level);
@@ -146,8 +152,8 @@ struct pic {
   bool read_service;
 };
 struct pit_channel {
-  uint32_t reload;
-  uint64_t started, periods;
+  uint32_t reload;                                     // 1..65536 PIT ticks; encoded count 0 means 65536
+  uint64_t started, periods;                           // start tick; completed periods already reported
   uint16_t write_latch, read_latch, count_latch;
   uint8_t mode, access, write_phase, read_phase, latch_bytes, status;
   bool active, gate, status_pending;
@@ -177,6 +183,10 @@ static int first_bit(uint8_t bits) {
 }
 
 // Fixed priority: IRQ 0 wins. A request may preempt only a lower-priority in-service IRQ.
+// Example: pending=0x12 (IRQ 1, 4), mask=0, service=0x04 (IRQ 2).
+//   allowed priorities = (1 << 2) - 1 = 0x03
+//   eligible = 0x12 & 0x03 = 0x02 -> IRQ 1; IRQ 4 must wait for IRQ 2's EOI.
+// An in-service IRQ 0 leaves no higher-priority bit, so it blocks every new request.
 static int pic_next(const struct pic *pic) {
   uint8_t eligible = pic->pending & (uint8_t)~pic->mask;
   int in_service = first_bit(pic->service);
@@ -186,10 +196,14 @@ static int pic_next(const struct pic *pic) {
 
 static void pic_ack(struct pic *pic, unsigned irq) {
   pic->pending &= (uint8_t)~(1u << irq);
+  // ICW4 bit 1 is automatic EOI: delivery then needs no later ISR clear from the guest.
   if (!(pic->icw4 & 2)) pic->service |= (uint8_t)(1u << irq);
 }
 
 // The slave PIC reaches the master through IRQ 2. Return its final vector, or -1.
+// Example with vector bases 0x20/0x28: ISA IRQ 9 -> slave bit 1 -> master bit 2
+// -> vector 0x29. Acknowledgment consumes both PICs' pending bits. ELCR level bits
+// refresh pending from the current wire level; edge requests survive a falling wire.
 static int pc_pic_pending(struct pc *pc) {
   for (unsigned i = 0; i < 2; i++)
     pc->pic[i].pending |= (uint8_t)(pc->lines >> (i * 8)) & pc->elcr[i];
@@ -215,6 +229,13 @@ static void pc_pic_ack(struct pc *pc) {
 //   data read      IMR: a 1 bit masks that IRQ
 //   ICW1..4 writes reset, vector base, cascade wiring, then mode
 //   EOI write      clear an in-service bit so the next request may be delivered
+//
+// A command-port ICW1 starts initialization; later data-port writes change meaning:
+//   step 1 -> ICW2 vector base -> step 2 -> ICW3 cascade -> step 3 -> ICW4 mode -> 0
+// ICW1 bit 1 skips ICW3 for single mode; bit 0 says whether ICW4 follows.
+// ICW3 is consumed but this machine keeps the fixed IRQ-2 cascade described above.
+// At step 0, data writes are masks again. OCW3 selects the command-port readback;
+// EOI clears either the named IRQ (bit 6 set) or the highest-priority ISR bit.
 static uint8_t pic_port(struct pic *pic, bool data, bool write, uint8_t value) {
   if (!write) return data ? pic->mask : (pic->read_service ? pic->service : pic->pending);
   if (data) {
@@ -243,6 +264,11 @@ static uint8_t pic_port(struct pic *pic, bool data, bool write, uint8_t value) {
 // An IOAPIC entry: bits 0-7 vector, 8-10 delivery, 11 logical destination,
 // 14 remote IRR, 15 level trigger, 16 mask, and 56-63 destination APIC ID.
 // A level request waits for EOI before it can be sent again; an edge needs a new rising line.
+// For an unmasked level route, the two acknowledgment orders have different outcomes:
+//   send -> remote IRR=1 -> device lowers line -> LAPIC EOI -> remote IRR=0, quiet
+//   send -> remote IRR=1 -> LAPIC EOI while line high -> send again, remote IRR=1
+// Thus repeatedly asserting an already-high line must not inject another request
+// while remote IRR is set. pc_irq() supplies logical line levels, not electrical polarity.
 static void ioapic_deliver(struct pc *pc, unsigned pin) {
   uint64_t entry = pc->routes[pin];
   if ((entry & IOAPIC_MASK) || (entry & IOAPIC_REMOTE)) return;
@@ -260,6 +286,9 @@ static void ioapic_deliver(struct pc *pc, unsigned pin) {
   if (entry & IOAPIC_LEVEL) pc->routes[pin] |= IOAPIC_REMOTE;
 }
 
+// Capture the rising edge before replacing the saved level. PIC edge requests latch
+// that transition; level requests can be withdrawn when the device lowers its line.
+// Both controllers see the same wire; their guest-programmed masks select the route.
 static void pc_irq(struct pc *pc, unsigned irq, bool high) {
   if (irq >= 24) return;
   uint32_t bit = 1u << irq;
@@ -299,10 +328,13 @@ static bool pc_mmio(struct pc *pc, unsigned offset, bool write, uint32_t *value)
     unsigned shift = (reg & 1) * 32;
     if (!write) *value = (uint32_t)(*entry >> shift);
     else {
+      // Low-half writes preserve remote IRR: only delivery/EOI owns that bit.
+      // The high half accepts only the destination byte, at entry bits 56..63.
       uint32_t part = (reg & 1) ? (*value & 0xff000000u) :
           ((*value & 0x1afffu) | ((uint32_t)*entry & IOAPIC_REMOTE));
       *entry = (*entry & ~(UINT64_C(0xffffffff) << shift)) | (uint64_t)part << shift;
       unsigned pin = (reg - 0x10) / 2;
+      // Unmasking a level route may expose a request that was already high.
       if ((*entry & IOAPIC_LEVEL) && (pc->lines & (1u << pin))) ioapic_deliver(pc, pin);
     }
   } else if (write) {
@@ -326,6 +358,13 @@ static uint64_t elapsed(const struct pc *pc, const struct pit_channel *channel) 
   return channel->active && channel->gate ? pc->ticks - channel->started : 0;
 }
 
+// Mode 3 counts down by two, except for the first decrement of an odd reload.
+// An odd reload gives the high half one extra tick compared with the low half.
+// Example, reload=5, with phase = elapsed % reload:
+//   phase           0  1  2  3  4    then repeat
+//   count           5  4  2  4  2
+//   pit_output()    1  1  1  0  0    high for ceil(5/2), low for floor(5/2)
+// The uint16_t result also encodes a count of 65536 as zero on the I/O port.
 static uint16_t pit_count(const struct pc *pc, const struct pit_channel *channel) {
   uint64_t ticks = elapsed(pc, channel);
   uint32_t count = channel->reload;
@@ -348,11 +387,17 @@ static bool pit_output(const struct pc *pc, const struct pit_channel *channel) {
 }
 
 static void pit_latch(struct pc *pc, struct pit_channel *channel) {
+  // A second latch request must not replace a snapshot the guest is still reading.
   if (channel->latch_bytes) return;
   channel->count_latch = pit_count(pc, channel);
   channel->latch_bytes = channel->access == 3 ? 2 : 1;
 }
 
+// Control byte: bits 7..6 select a channel, 5..4 select low/high/both count bytes,
+// 3..1 select the mode, and bit 0 requests unsupported BCD counting.
+// Access 0 latches without reprogramming. Channel select 3 is instead read-back:
+// bits 1..3 select channels, while cleared bits 5/4 request count/status snapshots.
+// Mode encodings 6 and 7 alias 2 and 3. A new configuration waits for a count write.
 static void pit_control(struct pc *pc, uint8_t value) {
   unsigned select = value >> 6;
   if (select == 3) {
@@ -380,6 +425,10 @@ static void pit_control(struct pc *pc, uint8_t value) {
       .access = (value >> 4) & 3, .gate = gate};
 }
 
+// For low-then-high access, write_phase=0 buffers the low byte; the second byte
+// commits the reload and restarts time. Example: OUT 0x34, then 0x12 -> 0x1234 ticks.
+// Reads return pending status first, then an explicit count latch. Without a latch,
+// read_phase still pairs the low/high bytes of one snapshot, even if time advances.
 static uint8_t pit_port(struct pc *pc, unsigned index, bool write, uint8_t value) {
   struct pit_channel *channel = &pc->pit[index];
   if (write) {
@@ -409,6 +458,10 @@ static uint8_t pit_port(struct pc *pc, unsigned index, bool write, uint8_t value
   return result;
 }
 
+// Convert seconds and their fractional remainder separately, avoiding now_ns * PIT_HZ.
+// periods counts expirations, not guest register reads. One delayed host wake may
+// span several periods; report one IRQ pulse and remember the new count. Mode 0
+// caps that count at one, so its one-shot cannot fire again without reprogramming.
 static void pc_tick(struct pc *pc, uint64_t now_ns) {
   pc->ticks = now_ns / 1000000000u * PIT_HZ + now_ns % 1000000000u * PIT_HZ / 1000000000u;
   struct pit_channel *timer = &pc->pit[0];
@@ -477,6 +530,9 @@ static uint32_t pc_port(struct pc *pc, uint16_t port, unsigned size, bool write,
   if (port >= 0x40 && port <= 0x42 && size == 1) return pit_port(pc, port - 0x40, write, byte);
   if (port == 0x43 && write) { pit_control(pc, byte); return 0; }
   if (port == 0x61) {
+    // Bit 0 gates channel 2; a rising gate restarts its interval. Linux polls bit 5
+    // for OUT2 during calibration. Bit 1 is only stored (no sound); bit 4 toggles
+    // with host-derived ticks (no DRAM refresh engine).
     if (write) {
       bool gate = (byte & 1) != 0;
       if (gate && !pc->pit[2].gate) pc->pit[2].started = pc->ticks;
@@ -511,6 +567,9 @@ static uint32_t pc_port(struct pc *pc, uint16_t port, unsigned size, bool write,
   return size == 1 ? 0xff : size == 2 ? 0xffff : UINT32_MAX;
 }
 
+// Begin with both interrupt controllers masked and PIT channels inactive. Linux
+// must program counts and routes before requests can reach the VP. Channel 2's
+// gate also starts low; the other channels' gates are wired high in this machine.
 static struct pc *pc_create(output_fn output, interrupt_fn interrupt, void *context) {
   struct pc *pc = calloc(1, sizeof *pc);
   if (!pc) return NULL;
@@ -587,6 +646,13 @@ static bool fail(struct console *console, const char *error) {
 //   descriptors: 16 * size, align 16   available: 6 + 2 * size, align 2
 //   used:         6 + 8 * size, align 4
 // Ready queues keep these addresses fixed until reset/reconfiguration while not ready.
+// All offsets and lengths below are bytes, relative to each queue GPA:
+//   desc_table + 16*n:  address:u64 | length:u32 | flags:u16 | next:u16
+//   avail_ring:         flags:u16 | idx:u16 | head[size]:u16 | used_event:u16
+//   used_ring:          flags:u16 | idx:u16 | {id:u32, len:u32}[size] | avail_event:u16
+// The guest writes descriptors/avail; vmmlite writes used. idx counts entries,
+// not bytes or ring slots. With size=8, these regions occupy 128, 22 and 70 bytes.
+// Alignment and whole-region RAM checks happen before any of these pointers are used.
 static bool queue_valid(struct console *console, const struct queue *queue) {
   return queue->size && queue->size <= QUEUE_SIZE_MAX && !(queue->size & (queue->size - 1)) &&
       !(queue->desc_table & 15) && !(queue->avail_ring & 1) && !(queue->used_ring & 3) &&
@@ -595,8 +661,14 @@ static bool queue_valid(struct console *console, const struct queue *queue) {
       in_ram(console->ram, queue->used_ring, 6 + (uint64_t)queue->size * 8);
 }
 
-// Validate the whole chain before output: no partial line or used entry for a malformed chain.
+// Validate the whole chain before output: malformed descriptors produce no bytes or
+// used entry for that chain. A later host-output failure can still leave partial text.
 // A descriptor is {address:64, length:32, flags:16, next:16}; only NEXT is offered for TX.
+// Each iteration visits one entry and either stops at NEXT=0 or follows its next index.
+// A chain needing more than queue->size visits cannot be a valid acyclic chain in
+// this table. The bound prevents looping forever without a separate visited bitmap.
+// Validation and output use two passes: the stopped single VP cannot change the
+// descriptors between them, and the output callback does not write guest RAM.
 static bool chain_valid(struct console *console, const struct queue *queue, unsigned head) {
   unsigned descriptor = head;
   for (unsigned walked = 0; walked < queue->size; walked++) {
@@ -621,6 +693,12 @@ static bool chain_valid(struct console *console, const struct queue *queue, unsi
 // len is 0 because TX reads the buffers; it writes no bytes into them. A malformed chain
 // publishes nothing for that chain; earlier completed chains stay completed.
 // Counters wrap at 65536, slots at queue->size. The guest can reclaim via used without an IRQ.
+//
+// Wrap example, size=8: next_avail=65535, avail.idx=1.
+//   uint16_t(1 - 65535) = 2 pending entries
+//   counter 65535 -> slot 7; counter 0 -> slot 0; next_avail becomes 1
+// head is a descriptor-table index stored in that slot, not the slot itself.
+// Each chain produces one used entry, even when it contains several descriptors.
 static bool console_transmit(struct console *console) {
   struct queue *queue = &console->queues[TRANSMIT_QUEUE];
   if (!queue->ready || !(console->status & DRIVER_OK) || (console->status & FAILED))
@@ -649,7 +727,8 @@ static bool console_transmit(struct console *console) {
     store32(completion + 4, 0); // Device read the TX buffers; it wrote zero bytes into them.
     queue->next_avail++;
     queue->next_used++;
-    // The only VP is stopped throughout this callback. No concurrent ring consumer.
+    // Publish the entry before its index. The only VP stays stopped throughout this
+    // callback; a concurrent worker or another VP would need its own ordering rules.
     store16(used + 2, queue->next_used);
   }
   if (!(le16(available) & 1)) { // VIRTQ_AVAIL_F_NO_INTERRUPT.
@@ -659,6 +738,9 @@ static bool console_transmit(struct console *console) {
   return true;
 }
 
+// Lower the device line before clearing negotiation, queue counters and errors.
+// Keep borrowed RAM/PC/callbacks alive and retain transmitted as a whole-run statistic;
+// resetting a virtio device does not recreate the partition or erase the guest's RAM.
 static void console_reset(struct console *console) {
   pc_irq(console->pc, VIRTIO_CONSOLE_IRQ, false);
   *console = (struct console){.ram = console->ram, .pc = console->pc,
@@ -689,6 +771,10 @@ static void console_reset(struct console *console) {
 //       -> configure queues 0 and 1 -> QueueReady -> DRIVER_OK (0xf) -> notify queue 1
 // This describes the contract, not a recorded Windows trace. Queue 0 retains its setup but
 // has no input source. Queue addresses stay fixed while ready. STATUS 0 resets both queues.
+// VERSION_1 is feature bit 32: selector 1 exposes it as bit 0 of a 32-bit register.
+// QueueReady=0 permits reconfiguration but does not reset counters; STATUS=0 does.
+// This sample checks feature agreement and DRIVER_OK's dependency on FEATURES_OK;
+// it does not enforce every transition in the driver's status sequence above.
 static bool console_register_read(struct console *console, unsigned offset, uint32_t *value) {
   if (offset >= VIRTIO_CONSOLE_SIZE || (offset & 3)) return fail(console, "unaligned virtio register access");
   struct queue *queue = console->queue_select < 2 ? &console->queues[console->queue_select] : NULL;
@@ -740,6 +826,8 @@ static bool console_register_write(struct console *console, unsigned offset, uin
     if (queue->ready) return fail(console, "queue address changed while ready");
     uint64_t *address = offset < VIRTIO_MMIO_QUEUE_DRIVER_LOW ? &queue->desc_table :
         offset < VIRTIO_MMIO_QUEUE_DEVICE_LOW ? &queue->avail_ring : &queue->used_ring;
+    // Each pair writes one 64-bit GPA in two halves; preserve the half not selected.
+    // QueueReady later validates the combined GPA before enabling queue access.
     unsigned shift = (offset & 4) ? 32 : 0;
     *address = (*address & ~(UINT64_C(0xffffffff) << shift)) | (uint64_t)value << shift;
     break;
@@ -804,6 +892,9 @@ static const char command_line[] =
     "earlycon=uart8250,io,0x3f8 console=hvc0 panic=-1 reboot=k "
     "virtio_mmio.device=4K@0xd0000000:5";
 
+// Borrow the host images and guest RAM; return NULL on success, or a static diagnostic.
+// Only success writes layout and copies the payload. setup_zero_page() must use that
+// validated layout and the same images/RAM; it does not repeat these placement checks.
 static const char *load_kernel(struct memory ram, struct image kernel, struct image initrd,
                                struct boot_layout *layout) {
   const uint8_t *image = kernel.bytes;
@@ -813,6 +904,9 @@ static const char *load_kernel(struct memory ram, struct image kernel, struct im
   if (le16(image + 0x206) < 0x20c || !(le16(image + 0x236) & 1) || !image[0x234])
     return "need a relocatable x86_64 kernel with boot protocol 2.12+";
   if (!(image[0x211] & 1)) return "need a bzImage loaded high";
+  // setup_sects excludes the boot sector, hence +1 before converting sectors to bytes.
+  // The jump displacement at 0x201 marks the header end; copying all setup code into
+  // boot_params would overwrite fields beyond the header.
   size_t setup_size = ((size_t)(image[0x1f1] ? image[0x1f1] : 4) + 1) * 512;
   size_t header_end = 0x202u + image[0x201];
   if (header_end < 0x264 || header_end > setup_size || setup_size >= kernel.size ||
@@ -826,16 +920,26 @@ static const char *load_kernel(struct memory ram, struct image kernel, struct im
     return "invalid kernel alignment";
   if (runtime < KERNEL_START) runtime = KERNEL_START;
   if (runtime > ram.size) return "kernel preferred address exceeds RAM";
+  // The payload loads at 1 MiB, but the decompressor may move its working region
+  // upward. Reserve init_size at the aligned runtime address, not merely payload bytes.
   runtime = (runtime + alignment - 1) & ~(alignment - 1);
   uint64_t footprint = le32(image + 0x260);               // init_size, not just compressed bytes
   size_t payload = kernel.size - setup_size;
   if (footprint < payload || !in_ram(ram, runtime, footprint) ||
       !in_ram(ram, KERNEL_START, payload))
     return "kernel initialization window exceeds RAM";
+  // initrd_addr_max is inclusive; convert to an exclusive ceiling in 64 bits so
+  // even a header value of 0xffffffff can be incremented before clamping to RAM.
   uint64_t ceiling = (uint64_t)le32(image + 0x22c) + 1;
   if (ceiling > ram.size) ceiling = ram.size;
   if (!initrd.bytes || !initrd.size || initrd.size > ceiling)
     return "initramfs is empty or exceeds its address limit";
+  // Round the start DOWN to 4 KiB so the archive's end stays below the ceiling.
+  // Illustrative values:
+  //   ceiling - initrd.size = 0x20000000 - 0x12345 = 0x1ffedcbb
+  //   clear the low 12 bits -> 0x1ffed000
+  // Rounding up would end at 0x20000345, beyond RAM. The size check above makes
+  // subtraction safe; the checks below keep the aligned archive above both kernel regions.
   uint64_t initrd_start = (ceiling - initrd.size) & ~UINT64_C(4095);
   if (initrd_start < runtime + footprint || initrd_start < KERNEL_START + payload)
     return "initramfs overlaps the kernel initialization window";
@@ -853,6 +957,9 @@ static const char *load_kernel(struct memory ram, struct image kernel, struct im
 //   0x228   cmd_line_ptr      0x20000           0x21c   ramdisk_size   archive length
 //   0x1e8   e820_entries      2                 0x2d0   e820_table     usable RAM ranges
 // The MP/BIOS hole is backed by host RAM but omitted from the RAM Linux may allocate.
+// Usable ranges are [0, 0x9fc00) and [0x100000, ram.size); E820 describes allocation
+// policy, it does not change WHP's mapping. The caller supplies zero-filled RAM from
+// VirtualAlloc, so boot_params fields not copied or written here remain zero.
 static void setup_zero_page(struct memory ram, struct image kernel, struct image initrd,
                             struct boot_layout layout) {
   const uint8_t *image = kernel.bytes;
@@ -889,6 +996,10 @@ static void setup_zero_page(struct memory ram, struct image kernel, struct image
 //   96      16 x 8   IRQ routes               ISA IRQ n -> IOAPIC pin n, including PIT IRQ 0
 //   224     2 x 8    local IRQ routes         ExtINT -> LINT0, NMI -> LINT1
 // The two checksums cover the floating pointer and configuration table separately.
+// Length 224 is relative to the PCMP header: 44 + 20 + 8 + 8 + 16*8 + 2*8.
+// Its 21 entries are 1 CPU + 1 bus + 1 IOAPIC + 16 IRQs + 2 local routes.
+// Including the 16-byte floating pointer, this occupies 240 bytes. Unwritten fields
+// rely on initially zero-filled RAM, including the checksum byte before each sum.
 static void setup_mptable(struct memory ram) {
   uint8_t *mp = ram.bytes + MPTABLE_START;
   // MP 1.4: floating pointer, configuration header, CPU, bus, IOAPIC, routes.
@@ -925,6 +1036,10 @@ static void setup_mptable(struct memory ram) {
 
 // Section 6: a flat GDT and three paging levels. The guest's first GiB is identity mapped;
 // section 2 backs only its first 512 MiB with RAM. Linux replaces these boot tables later.
+// Table entries use 0x03 = present | writable. PD leaves add bit 7 (0x83) for
+// 2 MiB pages, so no fourth-level page table is needed: 512 * 2 MiB = 1 GiB.
+// Unused entries stay zero/non-present. IOAPIC and console GPAs lie above this initial
+// virtual mapping; Linux must establish its own mappings before using those devices.
 static void setup_page_tables(struct memory ram) {
   store64(ram.bytes + GDT_START + 16, UINT64_C(0x00af9b000000ffff));
   store64(ram.bytes + GDT_START + 24, UINT64_C(0x00cf93000000ffff));
@@ -943,7 +1058,7 @@ struct vm {
   struct pc *pc;
   struct console *console;
   HANDLE stop, timer, timer_thread;
-  volatile LONG timer_error;
+  volatile LONG timer_error;                           // cross-thread HRESULT; accessed through Interlocked*
   LARGE_INTEGER frequency;
 };
 
@@ -961,6 +1076,9 @@ static HRESULT CALLBACK set_registers(void *context, const WHV_REGISTER_NAME *na
 }
 // Section 7's long-mode handoff. Values below are the cached CPU state, not just RAM's GDT.
 // Set control registers and segments in one batch: intermediate CPU modes may be invalid.
+// Zero-initializing values gives CS/data segments base 0 and an empty IDTR. Interrupts
+// start disabled; the kernel establishes its interrupt table before enabling them.
+// Writing the GDT bytes alone would not install these cached segment attributes in WHP.
 static bool boot_registers(struct vm *vm) {
   const struct { WHV_REGISTER_NAME name; uint64_t value; } scalar[] = {
     {WHvX64RegisterRip, KERNEL_ENTRY}, {WHvX64RegisterRsi, ZERO_PAGE_START},
@@ -999,6 +1117,9 @@ static bool boot_registers(struct vm *vm) {
 // WHP runtime: adapt the portable machine to host time, output, interrupts and instruction exits.
 // All callbacks execute on the VP thread. The timer helper below only cancels a blocked run.
 
+// QueryPerformanceCounter uses host counter ticks, not PIT ticks. frequency is captured
+// once at startup. Split whole seconds from the remainder before scaling to nanoseconds,
+// avoiding a multiplication of the full counter by one billion.
 static uint64_t now_ns(const struct vm *vm) {
   LARGE_INTEGER counter;
   QueryPerformanceCounter(&counter);
@@ -1028,6 +1149,10 @@ static bool interrupt(void *context, unsigned vector, unsigned destination,
 //                -> set registers (including RIP) -> EmulationSuccessful -> run again
 // An instruction may call us repeatedly (REP); the exit report is not a decoded device access.
 // The emulator may need RAM to fetch instruction bytes missing from WHP's exit context.
+// translate() has two results: HRESULT says whether WHP evaluated the request;
+// ResultCode says whether the guest's current page tables permit the translation.
+// S_OK alone does not mean a valid GPA. WinHvEmulation consumes ResultCode and, on
+// translation success, expects the GPA of the containing 4 KiB page, not a host pointer.
 static HRESULT CALLBACK translate(void *context, WHV_GUEST_VIRTUAL_ADDRESS address,
     WHV_TRANSLATE_GVA_FLAGS flags, WHV_TRANSLATE_GVA_RESULT_CODE *result,
     WHV_GUEST_PHYSICAL_ADDRESS *physical) {
@@ -1085,6 +1210,9 @@ static HRESULT CALLBACK memory(void *context, WHV_EMULATOR_MEMORY_ACCESS_INFO *a
 
 // A legacy PIC interrupt is an ExtINT event, with the vector the PIC selected.
 // Wait for IF=1, no interrupt shadow, and no other pending event; otherwise ask WHP for a window.
+// A window notification is permission to retry, not consumption of the PIC request.
+// Leave IRR pending until WHP accepts the event plus the wake-from-HLT state update.
+// Only then move the request into PIC service state; the guest has not yet handled it.
 static bool pic_interrupt(struct vm *vm) {
   int vector = pc_pic_pending(vm->pc);
   if (vector < 0) return true;
@@ -1129,10 +1257,13 @@ static bool cpuid(struct vm *vm, const WHV_RUN_VP_EXIT_CONTEXT *exit) {
   return checked(set_registers(vm, names, 5, values), "complete CPUID");
 }
 
-// Wake the VP loop every millisecond so it can service the PIT, even while the guest is halted.
+// Request a host wake every millisecond so the VP loop can service the PIT while halted.
 //   timer helper: wait -> WHvCancelRunVirtualProcessor -> wait again
 //   VP thread:    canceled exit -> pc_tick(now_ns) -> deliver interrupts -> run again
 // This helper never touches guest RAM or device state. Cleanup joins it before deleting VP 0.
+// Host scheduling can delay a wake; pc_tick() uses elapsed time and coalesces missed periods.
+// The shared failure result uses Interlocked access on both threads; volatile alone is
+// not the synchronization. The stop event is first, so it wins when both handles signal.
 static DWORD WINAPI timer_thread(void *context) {
   struct vm *vm = context;
   HANDLE events[] = {vm->stop, vm->timer};
@@ -1287,7 +1418,7 @@ int main(int argc, char **argv) {
   vm.stop = CreateEventW(NULL, TRUE, FALSE, NULL);
   vm.timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
   if (!vm.stop || !vm.timer) { win_checked(FALSE, "create timer events"); goto done; }
-  LARGE_INTEGER due = {.QuadPart = -10000}; // 1 ms, expressed in 100 ns units.
+  LARGE_INTEGER due = {.QuadPart = -10000}; // Negative = relative time: 1 ms in 100 ns units.
   if (!win_checked(SetWaitableTimer(vm.timer, &due, 1, NULL, NULL, FALSE), "SetWaitableTimer")) goto done;
   vm.timer_thread = CreateThread(NULL, 0, timer_thread, &vm, 0, NULL);
   if (!vm.timer_thread) { win_checked(FALSE, "CreateThread"); goto done; }
@@ -1315,6 +1446,8 @@ int main(int argc, char **argv) {
       continue;
     case WHvRunVpExitReasonCanceled:
     case WHvRunVpExitReasonX64InterruptWindow:
+      // No instruction to complete here. Recheck elapsed time and PIC eligibility
+      // at the top of the loop; neither exit means that the guest serviced an IRQ.
       continue;
     case WHvRunVpExitReasonX64Halt:
       // Modern WHP handles HLT internally. Avoid a tight loop on older hosts.
@@ -1325,6 +1458,8 @@ int main(int argc, char **argv) {
           (unsigned)exit.ExitReason, (uint64_t)exit.VpContext.Rip);
       goto done;
     }
+    // S_OK means status is valid, not that the instruction completed. Both the API
+    // result and EmulationSuccessful must permit resuming the guest.
     if (!checked(emulation_result, "WHP instruction emulator") || !status.EmulationSuccessful) {
       fprintf(stderr, "emulation status 0x%08x at RIP 0x%" PRIx64 "\n",
           (unsigned)status.AsUINT32, (uint64_t)exit.VpContext.Rip);
@@ -1335,6 +1470,10 @@ int main(int argc, char **argv) {
   result = 0;
 done:
   // Stop the helper before freeing anything it can reach, including the partition and VP.
+  // Ownership unwinds as: join timer -> destroy emulator/devices -> delete VP -> unmap RAM
+  // -> delete partition -> free host bytes. mapped/processor record completed setup steps,
+  // so this path also handles a failure halfway through construction. vm stays on the
+  // stack until every callback/thread that borrows its address has finished.
   if (vm.timer_thread) { SetEvent(vm.stop); WaitForSingleObject(vm.timer_thread, INFINITE); CloseHandle(vm.timer_thread); }
   if (vm.timer) CloseHandle(vm.timer);
   if (vm.stop) CloseHandle(vm.stop);
