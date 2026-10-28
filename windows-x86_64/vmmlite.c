@@ -1,5 +1,5 @@
 // vmmlite.c: a small VMM that boots Linux (x86_64, Windows WHP). For learning only.
-// From the repo root: make build:windows-x86_64    Run: make boot:windows-x86_64 KERNEL=/path/to/bzImage
+// From the repo root: make build:windows-x86_64    Run: make run:windows-x86_64 KERNEL=/path/to/bzImage
 // Native Windows boot is still unverified; README.md records the validation boundary.
 //
 //   vmmlite (this process)             WHP / Microsoft hypervisor       CPU (VT-x / AMD-V)
@@ -20,14 +20,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifndef VMMLITE_TEST                                    // portable tests include this same file
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>                                    // allocation, timer and thread lifetime
 #include <winhvplatform.h>                              // partition, VP, mappings and interrupts
 #include <winhvemulation.h>                             // complete the guest's IO/MMIO instruction
 #include <fcntl.h>
 #include <io.h>                                         // binary stdout on Windows
-#endif
 
 #define RAM_SIZE             (512u << 20)               // 512 MiB at guest physical address 0
 #define PAGE_SIZE            0x1000u                    // 4 KiB
@@ -88,7 +86,6 @@ static inline bool in_ram(struct memory ram, uint64_t address, uint64_t size) {
   return address <= ram.size && size <= ram.size - address;
 }
 
-#ifndef VMMLITE_TEST
 // Host errors and input files. Keep Windows lifetime/API details out of the device models.
 static bool checked(HRESULT result, const char *operation) {
   if (SUCCEEDED(result)) return true;
@@ -121,7 +118,6 @@ done:
   fclose(file);
   return success;
 }
-#endif
 
 typedef bool (*output_fn)(void *context, const uint8_t *bytes, size_t size);
 typedef bool (*interrupt_fn)(void *context, unsigned vector, unsigned destination,
@@ -620,7 +616,7 @@ static bool chain_valid(struct console *console, const struct queue *queue, unsi
 //   vmmlite: validate whole chain -> output each buffer -> used.ring[slot] = {head, 0}
 //                                                     -> publish used.idx -> optional IRQ 5
 //
-// The portable test joins desc[0] ("Hello ", 6) -> desc[1] ("WHP!\n", 5):
+// For example, join desc[0] ("Hello ", 6) -> desc[1] ("WHP!\n", 5):
 //   avail.idx 1, head 0 -> 11 output bytes -> used.ring[0] = {0, 0}, used.idx 1.
 // len is 0 because TX reads the buffers; it writes no bytes into them. A malformed chain
 // publishes nothing for that chain; earlier completed chains stay completed.
@@ -938,7 +934,6 @@ static void setup_page_tables(struct memory ram) {
     store64(ram.bytes + PD_START + page * 8, (uint64_t)page * (2u << 20) | 0x83);
 }
 
-#ifndef VMMLITE_TEST
 // ------------------------------------------------------------------------------------------
 // WHP host state and the initial CPU handoff. Device models above know no Windows handles.
 struct vm {
@@ -1356,4 +1351,3 @@ done:
   free((void *)initrd.bytes);
   return result;
 }
-#endif

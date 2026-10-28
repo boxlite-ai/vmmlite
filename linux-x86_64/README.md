@@ -14,7 +14,7 @@ prints one line through a virtio console and reboots.
 
 The [macOS / Apple Silicon companion](../macos-arm64/README.md) boots ARM64 Linux with
 Hypervisor.framework, a framework GICv3, and a modern virtio-MMIO console. Its walkthrough covers
-the device tree, ARM entry registers, interrupts, and the complete build and boot test.
+the device tree, ARM entry registers, interrupts, and the complete build and run sequence.
 
 ## Run it
 
@@ -30,9 +30,9 @@ make run:linux-x86_64
 ```
 
 The root [Makefile](../Makefile) places generated files in `.build/linux-x86_64/`.
-Use `KERNEL=/absolute/path/to/bzImage` to select another kernel. For the bounded CI
-check, `make test:linux-x86_64` requires exit 0 and the PID 1 greeting within 120 seconds;
-its log is `.build/linux-x86_64/boot.log`.
+Use `KERNEL=/absolute/path/to/bzImage` to select another kernel. The existing
+[boot workflow](../.github/workflows/boot.yml) requires exit 0 and the PID 1 greeting
+within 120 seconds.
 
 Trimmed output:
 

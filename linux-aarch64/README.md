@@ -3,7 +3,8 @@
 ## TL;DR
 
 A standalone KVM example boots an ARM64 Linux Image, prints the shared PID 1 greeting,
-and exits when the guest requests PSCI reset. [macos-arm64/](../macos-arm64/README.md) is the Apple Silicon example.
+and exits when the guest requests PSCI reset. This directory contains only this README,
+`vmmlite.c`, and `machine.dts`; the guest program is the shared [../init.c](../init.c).
 
 ## Build and run
 
@@ -11,29 +12,37 @@ Use a little-endian AArch64 Linux host with GICv3, PSCI support, and read/write 
 `/dev/kvm`. Virtual machines also need working nested virtualization. A cross-compiler
 or a Docker container without usable KVM cannot establish that this example boots.
 
-On Ubuntu/Debian, run from the repository root:
+Install the dependencies on Ubuntu/Debian:
 
 ```sh
-sudo apt-get install build-essential libfdt-dev device-tree-compiler cpio curl python3
+sudo apt-get install build-essential libfdt-dev device-tree-compiler cpio curl
+```
+
+From the repository root:
+
+```sh
 make build:linux-aarch64
 make kernel:linux-aarch64
 make run:linux-aarch64
-make test:linux-aarch64
 ```
 
-The root [Makefile](../Makefile) writes generated files to `.build/linux-aarch64/` and
-downloads and checks the SHA-256 of the same Linux 6.1.102 ARM64 fixture used by `macos-arm64/`.
-Despite its upstream filename `vmlinux`, this fixture is a raw `Image`, not ELF.
-Supply another compatible raw Image with `make run:linux-aarch64 KERNEL=/path/to/Image`.
-It needs built-in GICv3, architected timers, PSCI, initramfs, ELF, OF 8250, virtio-MMIO and virtio-console drivers.
+The root [Makefile](../Makefile) builds the VMM, compiles [machine.dts](machine.dts),
+and packs the static guest [init.c](../init.c). Generated files stay in
+`.build/linux-aarch64/`; the platform directory keeps only its three source files.
+
+`make kernel:linux-aarch64` downloads the same Linux 6.1.102 ARM64 fixture used by
+[macos-arm64/](../macos-arm64/README.md) and checks its SHA-256. Despite its upstream
+filename `vmlinux`, it is a raw `Image`, not ELF. Use another compatible Image with
+`make run:linux-aarch64 KERNEL=/absolute/path/to/Image`.
+It needs built-in GICv3, architected timers, PSCI, initramfs, ELF, OF 8250, virtio-MMIO
+and virtio-console drivers.
 
 The early log uses an MMIO 8250 UART, then Linux switches to the virtio console `hvc0`.
 KVM owns GICv3 and the architected timers; `machine.dts` describes the guest hardware.
+The guest `init` is statically linked so its initramfs needs no dynamic loader or libraries.
 
-`make test:linux-aarch64` exercises production address/loader/UART code, then requires three real
-Linux boots, a timed wakeup, 300 ordered guest writes and rejection of malformed files.
-Logs are retained under `.build/linux-aarch64/`. A successful run must print `Hello from PID 1!`
-once and `guest requested PSCI shutdown/reset`, then exit zero.
+A successful run prints `Hello from PID 1!` once and
+`guest requested PSCI shutdown/reset`, then exits zero.
 
 ## Limits
 

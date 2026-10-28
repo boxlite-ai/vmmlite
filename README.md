@@ -29,9 +29,9 @@ make build:windows-x86_64
 ```
 
 Choose the target for your host; the Windows executable can also be cross-built on Linux/macOS.
-Outputs stay in `.build/<platform>/`. `make test:<platform>` runs that platform's checks,
-and `make clean:<platform>` removes only its output directory. The Windows test target runs
-portable device checks; `make boot:windows-x86_64` runs the native acceptance harness.
+Outputs stay in `.build/<platform>/`. `make run:<platform>` starts the example,
+and `make clean:<platform>` removes only its output directory. Windows guest preparation
+runs separately on Linux/macOS with `make guest:windows-x86_64`.
 Use `make help` for the remaining targets and each platform README for prerequisites.
 
 > [!WARNING]

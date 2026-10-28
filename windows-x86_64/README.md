@@ -27,7 +27,7 @@ make build:windows-x86_64
 ```
 
 Run the target from the repository root. The shared [Makefile](../Makefile) writes
-`.build/windows-x86_64/vmmlite.exe` and copies the boot harness beside it.
+`.build/windows-x86_64/vmmlite.exe`.
 The executable imports `WinHvPlatform.dll` and
 `WinHvEmulation.dll` from Windows. The whole VMM is in [vmmlite.c](vmmlite.c), including the loader and device helpers.
 
@@ -72,14 +72,6 @@ The kernel's built-in initramfs must provide `/dev/console`, as the usual defaul
 initramfs does. A distro kernel with virtio-console available only as a module
 will not work with this minimal archive.
 
-An optional host-side check loads your real artifacts through the same loader:
-
-```sh
-make check-image:windows-x86_64 KERNEL=/path/to/bzImage
-```
-
-This checks the image handoff and memory placement; it does not execute the guest.
-
 ### Run on Windows 11 x64
 
 Enable CPU virtualization in firmware and **Windows Hypervisor Platform** in
@@ -91,25 +83,21 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 ```
 
 If Windows itself is a VM, its outer hypervisor must expose nested virtualization.
-Copy `vmmlite.exe`, `initramfs.cpio` and `test-boot.ps1` from `.build/windows-x86_64/`,
-plus your `bzImage`, into one Windows directory. Run in that directory:
+Copy `vmmlite.exe` and `initramfs.cpio` from `.build/windows-x86_64/`, plus your
+`bzImage`, into one Windows directory. Run in that directory:
 
 ```powershell
 .\vmmlite.exe --probe
-.\test-boot.ps1
+.\vmmlite.exe bzImage initramfs.cpio
 ```
 
-For guest files elsewhere:
+With the repository and prepared guest files on Windows, you can instead run from its root:
 
 ```powershell
-.\test-boot.ps1 -Kernel C:\guests\bzImage -Initramfs C:\guests\initramfs.cpio -TimeoutSeconds 120
+make run:windows-x86_64 KERNEL=C:/guests/bzImage
 ```
 
-The harness drains stdout and stderr concurrently, kills a timed-out process,
-and requires all three observations: a zero exit code, the PID 1 message, and a
-nonzero virtio TX count followed by guest reset. It writes `boot.stdout.log`,
-`boot.stderr.log` and, on success, `boot.evidence.json` with OS and artifact hashes.
-Keep these files when reporting a native boot result.
+Keep `initramfs.cpio` in `.build/windows-x86_64/` for the Make target.
 
 The **expected** final guest message is:
 
@@ -117,9 +105,9 @@ The **expected** final guest message is:
 Hello from PID 1!
 ```
 
-This is an acceptance marker, **not a captured WHP boot log**. The direct command
-`vmmlite.exe bzImage initramfs.cpio` is also available; use the bounded harness for
-verification because a guest panic can also request a reboot.
+This is expected output, **not a captured WHP boot log**. A successful run also
+prints `guest reset; virtio TX bytes=...` with a nonzero byte count and exits zero.
+A reboot alone does not establish success: a guest panic can request a reset too.
 
 ## How it works
 
@@ -155,11 +143,10 @@ guest-byte and file utilities, PC devices, virtio, boot data, initial CPU state,
 and WHP runtime callbacks. Named UART registers match the Linux and macOS examples;
 nearby tables explain reads, writes and interrupt effects.
 
-For a concrete queue example, `virtio()` in [tests/machine_test.c](tests/machine_test.c)
-supplies `"Hello "` plus `"WHP!\n"` in two linked descriptors. A queue-1 notification
-produces 11 output bytes, one used-ring entry `{id: 0, len: 0}`, and an IRQ 5 request.
-The completion length is zero because TX reads the guest's buffers. This portable
-test exercises the production device helpers without running Windows or guest instructions.
+For an illustrative queue example, link `"Hello "` and `"WHP!\n"` in two descriptors.
+A queue-1 notification produces 11 output bytes, one used-ring entry `{id: 0, len: 0}`,
+and an IRQ 5 request when interrupts are enabled. The completion length is zero because
+TX reads the guest's buffers. The comment above `console_transmit()` follows this path.
 
 ### Deliberate limits
 
@@ -181,25 +168,10 @@ synchronously while the single VP is stopped. This avoids the Linux example's
 | Host | What ran | Result / boundary |
 | --- | --- | --- |
 | macOS ARM64, Zig 0.16.0 | Windows x64 cross-build | PE executable linked against WHP and WinHvEmulation; no Windows execution |
-| macOS ARM64, native C compiler | Loader and device tests with ASan/UBSan | Existing loader, PIC/IOAPIC, PIT/UART and virtio cases exercised |
-| macOS ARM64, Ubuntu `6.8.0-147-generic` bzImage | Host-side image loading | Kernel and initramfs placement checked; guest instructions not executed |
-| Windows 11 x64 with WHP | Capability probe, PowerShell harness and Linux boot | **Not run yet** |
+| Windows 11 x64 with WHP | Capability probe and Linux boot | **Not run yet** |
 
-### Run the portable checks
-
-On macOS/Linux with a C compiler supporting ASan and UBSan:
-
-```sh
-make check:windows-x86_64
-```
-
-Run this from the repository root. `make check:windows-x86_64` runs the device/loader
-tests and builds the Windows executable. `make test:windows-x86_64` runs only the portable tests.
-Tests cover malformed boot headers and overlapping initialization windows,
-PIC priority and cascade, IOAPIC edge/level behavior, PIT count latches and
-calibration output, UART divisor access, virtio negotiation, descriptor bounds,
-cycles, completion, interrupt acknowledgment, reset and 16-bit ring wrap.
-They cannot establish WHP register acceptance, timer delivery, or guest boot.
+Cross-compilation does not establish WHP register acceptance, interrupt timing or Linux boot.
+Native Windows validation remains pending.
 
 ## Learn more
 
