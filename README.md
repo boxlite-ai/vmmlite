@@ -12,6 +12,7 @@ Choose the example for your host:
 | Host | Virtualization API | Code and walkthrough |
 | --- | --- | --- |
 | Linux, x86_64 | KVM | [linux-x86_64/](linux-x86_64/README.md) |
+| Linux, ARM64 | KVM | [linux-aarch64/](linux-aarch64/README.md) |
 | macOS, arm64 (Apple Silicon) | Hypervisor.framework | [macos-arm64/](macos-arm64/README.md) |
 | Windows, x86_64 | WHP | [windows-x86_64/](windows-x86_64/README.md) — native boot validation pending |
 
@@ -22,6 +23,7 @@ Build from the repository root with the shared [Makefile](Makefile):
 
 ```sh
 make build:linux-x86_64
+make build:linux-aarch64
 make build:macos-arm64
 make build:windows-x86_64
 ```

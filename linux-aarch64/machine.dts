@@ -1,0 +1,43 @@
+/dts-v1/;
+/ {
+    compatible = "linux,dummy-virt";
+    #address-cells = <2>;
+    #size-cells = <2>;
+    interrupt-parent = <&gic>;
+    chosen {
+        bootargs = "earlycon=uart8250,mmio,0x09000000 console=hvc0 panic=-1";
+        linux,initrd-start = <0 0>;
+        linux,initrd-end = <0 0>;
+    };
+    memory@40000000 { device_type = "memory"; reg = <0 0x40000000 0 0x20000000>; };
+    cpus {
+        #address-cells = <2>;
+        #size-cells = <0>;
+        cpu@0 { device_type = "cpu"; compatible = "arm,arm-v8"; reg = <0 0>; };
+    };
+    gic: interrupt-controller@8000000 {
+        compatible = "arm,gic-v3";
+        #interrupt-cells = <3>;
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+        interrupt-controller;
+        reg = <0 0x08000000 0 0x10000>, <0 0x10000000 0 0x20000>;
+    };
+    timer {
+        compatible = "arm,armv8-timer";
+        interrupts = <1 13 4>, <1 14 4>, <1 11 4>, <1 10 4>;
+    };
+    psci { compatible = "arm,psci-0.2"; method = "hvc"; };
+    serial@9000000 {
+        compatible = "ns8250";
+        reg = <0 0x09000000 0 8>;
+        clock-frequency = <1843200>;
+        interrupts = <0 0 4>; // SPI 0 is interrupt ID 32, level high.
+    };
+    virtio_mmio@a000000 {
+        compatible = "virtio,mmio";
+        reg = <0 0x0a000000 0 0x1000>;
+        interrupts = <0 1 1>; // SPI 1 -> INTID 33; edge rising for non-resampling irqfd.
+    };
+};
