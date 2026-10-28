@@ -35,8 +35,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1108,
-          "line_end": 1140,
+          "line_start": 1182,
+          "line_end": 1209,
           "symbol": "WHvCreatePartition",
           "tokens": [
             "WHvCreatePartition",
@@ -61,8 +61,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -87,8 +87,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -100,8 +100,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1113,
-          "line_end": 1123,
+          "line_start": 1182,
+          "line_end": 1192,
           "symbol": "WHvX64LocalApicEmulationModeXApic",
           "tokens": [
             "WHvX64LocalApicEmulationModeXApic"
@@ -127,8 +127,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -168,8 +168,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1108,
-          "line_end": 1140,
+          "line_start": 1182,
+          "line_end": 1209,
           "symbol": "WHvCreatePartition",
           "tokens": [
             "WHvCreatePartition",
@@ -205,8 +205,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -234,8 +234,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",

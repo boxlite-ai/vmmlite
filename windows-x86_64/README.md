@@ -151,6 +151,16 @@ Before `main()` come the device and boot helpers:
 line, drains the console, and requests reboot. The [walkthrough](tutorial.md) follows
 these same section numbers from CPU background to the full boot path.
 
+Start at `main()` for the boot sequence, then follow its helpers. The file groups
+guest-byte and file utilities, PC devices, virtio, boot data, initial CPU state,
+and WHP runtime callbacks. Named UART registers match the Linux and macOS examples;
+nearby tables explain reads, writes and interrupt effects.
+
+For a concrete queue example, the [walkthrough's two-buffer trace](tutorial.md#09-virtqueues-setup-then-data-through-shared-memory)
+uses the existing portable test: `"Hello "` plus `"WHP!\n"` becomes 11 output bytes,
+one used-ring entry `{0, 0}`, and an IRQ 5 request. This exercises the production
+device helpers without running Windows or guest instructions.
+
 ### Deliberate limits
 
 The PIT models binary modes 0, 2 and 3; other programming fails with a diagnostic.

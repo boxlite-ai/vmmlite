@@ -17,6 +17,11 @@ and exact tokens. The WHP figures were drawn against `windows-x86_64/vmmlite.c`
 SHA-256 `4b049e4dfa389251e5193a666b3c4a4fedeef551b621ec734fe1b9a407d0dd55`.
 The figure footer identifies that source hash, not a Git commit.
 
+The readability revision retains the depicted machine and API paths. Its evidence
+windows follow the reorganized source; the artwork's footer continues to identify
+the source used for the original drawing. Check each manifest against the current
+file rather than treating that historical hash as the current source revision.
+
 Firecracker evidence paths belong to its own repository, not this one. Validate
 that manifest against [Firecracker commit 6ec271414300fb8f0ff1ff79ad321bb7467d072f](https://github.com/firecracker-microvm/firecracker/blob/6ec271414300fb8f0ff1ff79ad321bb7467d072f/docs/design.md).
 The reference blob is `4d40dffaabe1580f7dfdbca9a77e03660083e684`. No Firecracker code

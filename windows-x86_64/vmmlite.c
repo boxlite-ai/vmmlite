@@ -8,8 +8,10 @@
 //   | COM1, virtio console     |<----| exit context              |<------| until a VM exit  |
 //   +--------------------------+ exits +-------------------------+ exit  +------------------+
 //
-// Read main() as the same eight boot steps as the Linux/KVM example. The device helpers
-// come first; WHP supplies the LAPIC, while this process supplies the other PC devices.
+// Start at main() for the same eight boot steps as the Linux/KVM example, then follow helpers:
+//   guest bytes / host files -> PC devices -> virtio console -> boot data -> WHP adapters -> main
+// WHP supplies the LAPIC. This file supplies the PIC, IOAPIC and PIT that KVM handles in-kernel.
+// Device state and guest RAM belong to the VP thread; the timer helper only wakes that thread.
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -52,6 +54,14 @@
 #define QUEUE_SIZE_MAX       256u
 #define TRANSMIT_QUEUE       1u                         // queue 0 is input; queue 1 is output
 
+// The same UART register/bit names as the Linux and macOS companions.
+enum { UART_RX = 0, UART_TX = 0, UART_IER = 1, UART_IIR = 2, UART_LCR = 3,
+       UART_LSR = 5, UART_MSR = 6, UART_IER_THRI = 2, UART_IIR_NO_INT = 1,
+       UART_IIR_THRI = 2, UART_LCR_DLAB = 0x80, UART_LSR_TEMT = 0x40, UART_LSR_THRE = 0x20 };
+
+// ------------------------------------------------------------------------------------------
+// Guest bytes: addresses below are GPAs, not pointers into the host process.
+// RAM starts at GPA 0, so GPA 0x1000 becomes ram.bytes + 0x1000 after checking the whole range.
 struct memory { uint8_t *bytes; size_t size; };
 struct image { const uint8_t *bytes; size_t size; };
 
@@ -78,11 +88,48 @@ static inline bool in_ram(struct memory ram, uint64_t address, uint64_t size) {
   return address <= ram.size && size <= ram.size - address;
 }
 
+#ifndef VMMLITE_TEST
+// Host errors and input files. Keep Windows lifetime/API details out of the device models.
+static bool checked(HRESULT result, const char *operation) {
+  if (SUCCEEDED(result)) return true;
+  fprintf(stderr, "%s: HRESULT 0x%08lx\n", operation, (unsigned long)result);
+  return false;
+}
+
+static bool win_checked(BOOL result, const char *operation) {
+  if (result) return true;
+  fprintf(stderr, "%s: Win32 error %lu\n", operation, GetLastError());
+  return false;
+}
+
+// Read host files before creating the partition. Sections 3-4 validate their guest placement;
+// main() owns these allocations and frees them on both success and partial setup failure.
+static bool read_image(const char *path, struct image *image) {
+  FILE *file = fopen(path, "rb");
+  if (!file) { perror(path); return false; }
+  bool success = false;
+  uint8_t *bytes = NULL;
+  if (fseek(file, 0, SEEK_END) != 0) goto done;
+  long size = ftell(file);
+  if (size <= 0 || (unsigned long)size > RAM_SIZE || fseek(file, 0, SEEK_SET) != 0) goto done;
+  bytes = malloc((size_t)size);
+  if (!bytes || fread(bytes, 1, (size_t)size, file) != (size_t)size) goto done;
+  *image = (struct image){bytes, (size_t)size};
+  success = true;
+done:
+  if (!success) { fprintf(stderr, "cannot read %s (expected 1..512 MiB)\n", path); free(bytes); }
+  fclose(file);
+  return success;
+}
+#endif
+
 typedef bool (*output_fn)(void *context, const uint8_t *bytes, size_t size);
 typedef bool (*interrupt_fn)(void *context, unsigned vector, unsigned destination,
                              unsigned delivery, bool logical, bool level);
 
-// The PC devices KVM supplies in-kernel, but WHP leaves to vmmlite.
+// ------------------------------------------------------------------------------------------
+// PC devices: shared state, interrupt controllers, PIT, COM1, then their port dispatcher.
+// KVM supplies the PIC/IOAPIC/PIT in-kernel; WHP leaves them to vmmlite.
 // All their state belongs to the VP thread; timer_thread() only asks that thread to wake.
 //
 //   device line       PIC path, before Linux masks it       IOAPIC path, after setup
@@ -115,16 +162,19 @@ struct pc {
   uint64_t ticks;                                       // host time, in 1,193,182 Hz PIT ticks
   uint64_t routes[24];                                  // IOAPIC redirection entries, one per pin
   uint32_t lines;
-  uint8_t elcr[2], select, apic_id, speaker, cmos_index;
-  uint8_t uart[8];
-  uint16_t divisor;
-  bool tx_pending, reset;
+  uint8_t elcr[2], select, apic_id, speaker, cmos_index;  // PIC, IOAPIC, PIT gate and RTC selectors
+  uint8_t uart[8];                                      // UART registers addressed relative to COM1_PORT
+  uint16_t divisor;                                    // registers 0/1 while LCR.DLAB is set
+  bool tx_pending, reset;                              // TX-empty event and guest reset request
   output_fn output;
   interrupt_fn interrupt;
   void *context;
   const char *error;
 };
 
+// PIC arbitration: IRR (pending) -> IMR (mask) -> priority -> ISR (in service).
+// pc_pic_pending() chooses without consuming. pc_pic_ack() consumes only after WHP accepts
+// the ExtINT event; the guest's later EOI clears ISR so lower-priority requests can proceed.
 static int first_bit(uint8_t bits) {
   for (int bit = 0; bit < 8; bit++) if (bits & (1u << bit)) return bit;
   return -1;
@@ -189,6 +239,11 @@ static uint8_t pic_port(struct pic *pic, bool data, bool write, uint8_t value) {
   return 0;
 }
 
+// IOAPIC routing: a device line is a pin number, not a CPU interrupt vector.
+//   IRQ 5 high -> routes[5] selects vector/destination -> interrupt() -> WHP local APIC
+//   device ACK -> IRQ 5 low            LAPIC EOI -> pc_eoi() clears remote IRR
+// These are separate acknowledgments. EOI retries delivery only if the level is still high.
+//
 // An IOAPIC entry: bits 0-7 vector, 8-10 delivery, 11 logical destination,
 // 14 remote IRR, 15 level trigger, 16 mask, and 56-63 destination APIC ID.
 // A level request waits for EOI before it can be sent again; an edge needs a new rising line.
@@ -268,6 +323,9 @@ static bool pc_mmio(struct pc *pc, unsigned offset, bool write, uint32_t *value)
 // Counts derive from elapsed host time, not the number of reads the guest makes.
 //   mode 0   one countdown       mode 2   rate generator       mode 3   square wave
 // A latch keeps both bytes of a count together even if host time advances between reads.
+//   OUT control + count -> record reload/start -> elapsed host ticks -> count/output
+//   channel 0 expiry -> pc_tick() pulses IRQ 0; channel 2 output -> bit 5 of port 0x61
+// A register read observes time; it does not manufacture a tick. The VP thread updates ticks.
 static uint64_t elapsed(const struct pc *pc, const struct pit_channel *channel) {
   return channel->active && channel->gate ? pc->ticks - channel->started : 0;
 }
@@ -379,38 +437,42 @@ static void pc_tick(struct pc *pc, uint64_t now_ns) {
 //   6     MSR: 0xb0, fixed modem signals   -
 //   7     scratch byte                      scratch byte
 //
-// With DLAB set, registers 0 and 1 hold the divisor, not text. IRQ 4 stays high while
-// TX-empty is enabled and pending; reading IIR acknowledges that event.
+// With DLAB set, registers 0 and 1 hold the divisor, not text.
+//   DLAB=0, OUT COM1+UART_TX, 'H' -> output callback -> transmitter empty
+//   TX-empty + IER.THRI -> IRQ 4 high -> read IIR -> consume event -> IRQ 4 low
+// earlycon polls LSR until the virtio driver registers hvc0; later output uses the queue.
 static uint8_t com1(struct pc *pc, unsigned reg, bool write, uint8_t value) {
-  if ((pc->uart[3] & 0x80) && reg < 2) {
+  if ((pc->uart[UART_LCR] & UART_LCR_DLAB) && reg < 2) {
     if (write) pc->divisor = (uint16_t)((pc->divisor & ~(0xffu << (reg * 8))) | (unsigned)value << (reg * 8));
     return (uint8_t)(pc->divisor >> (reg * 8));
   }
   uint8_t result = 0;
   if (write) {
-    if (reg == 0) {
+    if (reg == UART_TX) {
       if (!pc->output(pc->context, &value, 1)) pc->error = "serial output failed";
       pc->tx_pending = true;
-    } else if (reg == 1) {
-      if ((value & 2) && !(pc->uart[1] & 2)) pc->tx_pending = true;
-      pc->uart[1] = value & 15;
+    } else if (reg == UART_IER) {
+      if ((value & UART_IER_THRI) && !(pc->uart[UART_IER] & UART_IER_THRI)) pc->tx_pending = true;
+      pc->uart[UART_IER] = value & 15;
     } else pc->uart[reg] = value;
   } else {
     result = pc->uart[reg];
-    if (reg == 0) result = 0;
-    if (reg == 2) {
-      result = (pc->tx_pending && (pc->uart[1] & 2)) ? 2 : 1;
-      if (result == 2) pc->tx_pending = false;
+    if (reg == UART_RX) result = 0;
+    if (reg == UART_IIR) {
+      result = (pc->tx_pending && (pc->uart[UART_IER] & UART_IER_THRI)) ? UART_IIR_THRI : UART_IIR_NO_INT;
+      if (result == UART_IIR_THRI) pc->tx_pending = false;
     }
-    if (reg == 5) result = 0x60;
-    if (reg == 6) result = 0xb0;
+    if (reg == UART_LSR) result = UART_LSR_TEMT | UART_LSR_THRE;
+    if (reg == UART_MSR) result = 0xb0;
   }
-  pc_irq(pc, COM1_IRQ, pc->tx_pending && (pc->uart[1] & 2));
+  pc_irq(pc, COM1_IRQ, pc->tx_pending && (pc->uart[UART_IER] & UART_IER_THRI));
   return result;
 }
 
-// The port bus, called by the WHP instruction emulator in section 8.
-// Other small PC probes are answered here too: CMOS date, A20, and the i8042 reset command.
+// Port dispatch, called by io() after WinHvEmulation decodes an IN/OUT in section 8.
+//   0x20/21, 0xa0/a1 -> PIC       0x40..43, 0x61 -> PIT       0x3f8..3ff -> COM1
+//   0x4d0/1 -> PIC edge/level     0x70/71 -> fixed CMOS date   0x64=0xfe -> reset
+// Other small probes get fixed answers. IOAPIC and virtio are MMIO, handled by memory().
 static uint32_t pc_port(struct pc *pc, uint16_t port, unsigned size, bool write, uint32_t value) {
   uint8_t byte = (uint8_t)value;
   if (port >= COM1_PORT && port < COM1_PORT + COM1_SIZE && size == 1) return com1(pc, port - COM1_PORT, write, byte);
@@ -469,6 +531,7 @@ static void pc_destroy(struct pc *pc) { free(pc); }
 static bool pc_reset_requested(const struct pc *pc) { return pc->reset; }
 static const char *pc_error(const struct pc *pc) { return pc->error; }
 
+// ------------------------------------------------------------------------------------------
 // The virtio console: Linux's hvc0, at 0xd0000000 on IRQ 5. Section 4 names both.
 // Queue 0 receives (there is no input source); queue 1 transmits buffers already in guest RAM.
 //
@@ -524,6 +587,10 @@ static bool fail(struct console *console, const char *error) {
   return false;
 }
 
+// Split-ring sizes, including unused trailing event fields:
+//   descriptors: 16 * size, align 16   available: 6 + 2 * size, align 2
+//   used:         6 + 8 * size, align 4
+// Ready queues keep these addresses fixed until reset/reconfiguration while not ready.
 static bool queue_valid(struct console *console, const struct queue *queue) {
   return queue->size && queue->size <= QUEUE_SIZE_MAX && !(queue->size & (queue->size - 1)) &&
       !(queue->desc_table & 15) && !(queue->avail_ring & 1) && !(queue->used_ring & 3) &&
@@ -548,10 +615,16 @@ static bool chain_valid(struct console *console, const struct queue *queue, unsi
   return fail(console, "cyclic TX descriptor chain");
 }
 
-// console_transmit(): take each available head, print its chain, then give that head back in used.
-//   avail: {flags, idx, ring[head...]}   used: {flags, idx, ring[{id, len}...]}
-// The driver writes avail; this device writes used. len is 0: the device only READ the buffers.
-// After publishing completions, raise IRQ 5 unless the driver asked to suppress interrupts.
+// One output chain, while VP 0 is stopped:
+//   Linux:   buffer -> descriptor(s) -> avail.ring[slot] = head -> avail.idx++ -> QUEUE_NOTIFY=1
+//   vmmlite: validate whole chain -> output each buffer -> used.ring[slot] = {head, 0}
+//                                                     -> publish used.idx -> optional IRQ 5
+//
+// The portable test joins desc[0] ("Hello ", 6) -> desc[1] ("WHP!\n", 5):
+//   avail.idx 1, head 0 -> 11 output bytes -> used.ring[0] = {0, 0}, used.idx 1.
+// len is 0 because TX reads the buffers; it writes no bytes into them. A malformed chain
+// publishes nothing for that chain; earlier completed chains stay completed.
+// Counters wrap at 65536, slots at queue->size. The guest can reclaim via used without an IRQ.
 static bool console_transmit(struct console *console) {
   struct queue *queue = &console->queues[TRANSMIT_QUEUE];
   if (!queue->ready || !(console->status & DRIVER_OK) || (console->status & FAILED))
@@ -615,8 +688,11 @@ static void console_reset(struct console *console) {
 //   0x090/94 QUEUE_DRIVER_LOW/HIGH -                        available-ring GPA
 //   0x0a0/a4 QUEUE_DEVICE_LOW/HIGH -                        used-ring GPA
 //
-// Linux probes the IDs, resets, accepts VERSION_1, supplies both queues, then sets DRIVER_OK.
-// Queue addresses stay fixed while ready. These checks remain even in a single-file example.
+// Linux's control path:
+//   IDs -> STATUS 0 -> ACKNOWLEDGE (1) -> DRIVER (3) -> accept VERSION_1 -> FEATURES_OK (0xb)
+//       -> configure queues 0 and 1 -> QueueReady -> DRIVER_OK (0xf) -> notify queue 1
+// This describes the contract, not a recorded Windows trace. Queue 0 retains its setup but
+// has no input source. Queue addresses stay fixed while ready. STATUS 0 resets both queues.
 static bool console_register_read(struct console *console, unsigned offset, uint32_t *value) {
   if (offset >= VIRTIO_CONSOLE_SIZE || (offset & 3)) return fail(console, "unaligned virtio register access");
   struct queue *queue = console->queue_select < 2 ? &console->queues[console->queue_select] : NULL;
@@ -701,6 +777,10 @@ static struct console *console_create(struct memory ram, struct pc *pc, output_f
 static void console_destroy(struct console *console) { free(console); }
 static const char *console_error(const struct console *console) { return console->error; }
 static uint64_t console_bytes(const struct console *console) { return console->transmitted; }
+
+// ------------------------------------------------------------------------------------------
+// Linux boot data, sections 3-6: bytes placed in RAM before the first guest instruction.
+// The CPU's matching cached state is installed separately by boot_registers() in section 7.
 
 // The byte that makes the low eight bits of the entire MP-table sum equal zero.
 static uint8_t checksum(const uint8_t *bytes, size_t size) {
@@ -859,6 +939,8 @@ static void setup_page_tables(struct memory ram) {
 }
 
 #ifndef VMMLITE_TEST
+// ------------------------------------------------------------------------------------------
+// WHP host state and the initial CPU handoff. Device models above know no Windows handles.
 struct vm {
   WHV_PARTITION_HANDLE partition;
   WHV_EMULATOR_HANDLE emulator;
@@ -870,44 +952,8 @@ struct vm {
   LARGE_INTEGER frequency;
 };
 
-static bool checked(HRESULT result, const char *operation) {
-  if (SUCCEEDED(result)) return true;
-  fprintf(stderr, "%s: HRESULT 0x%08lx\n", operation, (unsigned long)result);
-  return false;
-}
-
-static bool win_checked(BOOL result, const char *operation) {
-  if (result) return true;
-  fprintf(stderr, "%s: Win32 error %lu\n", operation, GetLastError());
-  return false;
-}
-
-static uint64_t now_ns(const struct vm *vm) {
-  LARGE_INTEGER counter;
-  QueryPerformanceCounter(&counter);
-  uint64_t ticks = (uint64_t)counter.QuadPart, frequency = (uint64_t)vm->frequency.QuadPart;
-  return ticks / frequency * 1000000000u + ticks % frequency * 1000000000u / frequency;
-}
-
-static bool output(void *context, const uint8_t *bytes, size_t size) {
-  (void)context;
-  return fwrite(bytes, 1, size, stdout) == size;
-}
-
-static bool interrupt(void *context, unsigned vector, unsigned destination,
-                      unsigned delivery, bool logical, bool level) {
-  struct vm *vm = context;
-  WHV_INTERRUPT_CONTROL request = {0};
-  request.Type = delivery;
-  request.DestinationMode = logical ? WHvX64InterruptDestinationModeLogical : WHvX64InterruptDestinationModePhysical;
-  request.TriggerMode = level ? WHvX64InterruptTriggerModeLevel : WHvX64InterruptTriggerModeEdge;
-  request.Destination = destination;
-  request.Vector = vector;
-  return checked(WHvRequestInterrupt(vm->partition, &request, sizeof request), "WHvRequestInterrupt");
-}
-
-// WinHvEmulation asks these callbacks for register state and translated guest pages.
-// It uses the same VP 0 as section 8; it may also read RAM to fetch instruction bytes.
+// WHP register access: shared by the initial CPU setup and runtime instruction completion.
+// A partition handle plus VP index 0 identifies the saved CPU state; RAM is separate.
 static HRESULT CALLBACK get_registers(void *context, const WHV_REGISTER_NAME *names,
                                       UINT32 count, WHV_REGISTER_VALUE *values) {
   struct vm *vm = context;
@@ -918,55 +964,6 @@ static HRESULT CALLBACK set_registers(void *context, const WHV_REGISTER_NAME *na
   struct vm *vm = context;
   return WHvSetVirtualProcessorRegisters(vm->partition, 0, names, count, values);
 }
-static HRESULT CALLBACK translate(void *context, WHV_GUEST_VIRTUAL_ADDRESS address,
-    WHV_TRANSLATE_GVA_FLAGS flags, WHV_TRANSLATE_GVA_RESULT_CODE *result,
-    WHV_GUEST_PHYSICAL_ADDRESS *physical) {
-  struct vm *vm = context;
-  WHV_TRANSLATE_GVA_RESULT translation = {0};
-  HRESULT hr = WHvTranslateGva(vm->partition, 0, address, flags, &translation, physical);
-  if (SUCCEEDED(hr)) { *result = translation.ResultCode; *physical &= ~UINT64_C(4095); }
-  return hr;
-}
-
-// One decoded IN/OUT. Advance the PIT first so a count read observes elapsed host time.
-static HRESULT CALLBACK io(void *context, WHV_EMULATOR_IO_ACCESS_INFO *access) {
-  struct vm *vm = context;
-  if (access->AccessSize != 1 && access->AccessSize != 2 && access->AccessSize != 4) return E_INVALIDARG;
-  pc_tick(vm->pc, now_ns(vm));
-  access->Data = pc_port(vm->pc, access->Port, access->AccessSize, access->Direction != 0, access->Data);
-  return pc_error(vm->pc) ? E_FAIL : S_OK;
-}
-
-// One decoded memory access: RAM, console registers, or the IOAPIC selector/window.
-// WHP owns the local APIC. An unsupported MMIO access fails with its guest physical address.
-static HRESULT CALLBACK memory(void *context, WHV_EMULATOR_MEMORY_ACCESS_INFO *access) {
-  struct vm *vm = context;
-  uint64_t address = access->GpaAddress;
-  unsigned size = access->AccessSize;
-  bool write = access->Direction != 0;
-  if (!size || size > sizeof access->Data) return E_INVALIDARG;
-  // The instruction emulator may fetch instruction/operand bytes from ordinary RAM.
-  if (in_ram(vm->ram, address, size)) {
-    if (write) memcpy(vm->ram.bytes + address, access->Data, size);
-    else memcpy(access->Data, vm->ram.bytes + address, size);
-    return S_OK;
-  }
-  if (size != 4 || (address & 3)) return E_INVALIDARG;
-  uint32_t value = le32(access->Data);
-  bool handled = false;
-  if (address >= VIRTIO_CONSOLE_START && address - VIRTIO_CONSOLE_START < 4096)
-    handled = write ? console_register_write(vm->console, (unsigned)(address - VIRTIO_CONSOLE_START), value) :
-        console_register_read(vm->console, (unsigned)(address - VIRTIO_CONSOLE_START), &value);
-  else if (address >= IO_APIC_DEFAULT_PHYS_BASE && address - IO_APIC_DEFAULT_PHYS_BASE < 4096)
-    handled = pc_mmio(vm->pc, (unsigned)(address - IO_APIC_DEFAULT_PHYS_BASE), write, &value);
-  if (!handled) {
-    fprintf(stderr, "unhandled MMIO %s at GPA 0x%" PRIx64 "\n", write ? "write" : "read", address);
-    return E_FAIL;
-  }
-  if (!write) store32(access->Data, value);
-  return S_OK;
-}
-
 // Section 7's long-mode handoff. Values below are the cached CPU state, not just RAM's GDT.
 // Set control registers and segments in one batch: intermediate CPU modes may be invalid.
 static bool boot_registers(struct vm *vm) {
@@ -1001,6 +998,94 @@ static bool boot_registers(struct vm *vm) {
   segments[7].Table.Limit = 31;
   // Install CR0/CR4/EFER and segment state together, without intermediate modes.
   return checked(set_registers(vm, names, REGISTERS, values), "set initial CPU state");
+}
+
+// ------------------------------------------------------------------------------------------
+// WHP runtime: adapt the portable machine to host time, output, interrupts and instruction exits.
+// All callbacks execute on the VP thread. The timer helper below only cancels a blocked run.
+
+static uint64_t now_ns(const struct vm *vm) {
+  LARGE_INTEGER counter;
+  QueryPerformanceCounter(&counter);
+  uint64_t ticks = (uint64_t)counter.QuadPart, frequency = (uint64_t)vm->frequency.QuadPart;
+  return ticks / frequency * 1000000000u + ticks % frequency * 1000000000u / frequency;
+}
+
+static bool output(void *context, const uint8_t *bytes, size_t size) {
+  (void)context;
+  return fwrite(bytes, 1, size, stdout) == size;
+}
+
+static bool interrupt(void *context, unsigned vector, unsigned destination,
+                      unsigned delivery, bool logical, bool level) {
+  struct vm *vm = context;
+  WHV_INTERRUPT_CONTROL request = {0};
+  request.Type = delivery;
+  request.DestinationMode = logical ? WHvX64InterruptDestinationModeLogical : WHvX64InterruptDestinationModePhysical;
+  request.TriggerMode = level ? WHvX64InterruptTriggerModeLevel : WHvX64InterruptTriggerModeEdge;
+  request.Destination = destination;
+  request.Vector = vector;
+  return checked(WHvRequestInterrupt(vm->partition, &request, sizeof request), "WHvRequestInterrupt");
+}
+
+// WinHvEmulation's instruction path, used by section 8:
+//   exit context -> decode -> get registers / translate / read RAM -> io() or memory()
+//                -> set registers (including RIP) -> EmulationSuccessful -> run again
+// An instruction may call us repeatedly (REP); the exit report is not a decoded device access.
+// The emulator may need RAM to fetch instruction bytes missing from WHP's exit context.
+static HRESULT CALLBACK translate(void *context, WHV_GUEST_VIRTUAL_ADDRESS address,
+    WHV_TRANSLATE_GVA_FLAGS flags, WHV_TRANSLATE_GVA_RESULT_CODE *result,
+    WHV_GUEST_PHYSICAL_ADDRESS *physical) {
+  struct vm *vm = context;
+  WHV_TRANSLATE_GVA_RESULT translation = {0};
+  HRESULT hr = WHvTranslateGva(vm->partition, 0, address, flags, &translation, physical);
+  if (SUCCEEDED(hr)) { *result = translation.ResultCode; *physical &= ~UINT64_C(4095); }
+  return hr;
+}
+
+// One decoded IN/OUT. Advance the PIT first so a count read observes elapsed host time.
+// Example with DLAB clear: OUT 0x3f8, 'H' -> io() -> pc_port() -> com1(UART_TX) -> stdout.
+// Returning S_OK lets the emulator finish the instruction; this callback does not move RIP.
+static HRESULT CALLBACK io(void *context, WHV_EMULATOR_IO_ACCESS_INFO *access) {
+  struct vm *vm = context;
+  if (access->AccessSize != 1 && access->AccessSize != 2 && access->AccessSize != 4) return E_INVALIDARG;
+  pc_tick(vm->pc, now_ns(vm));
+  access->Data = pc_port(vm->pc, access->Port, access->AccessSize, access->Direction != 0, access->Data);
+  return pc_error(vm->pc) ? E_FAIL : S_OK;
+}
+
+// One decoded memory access: RAM, console registers, or the IOAPIC selector/window.
+// WHP owns the local APIC. An unsupported MMIO access fails with its guest physical address.
+// Example after DEVICE_FEATURES_SEL=1:
+//   load32(0xd0000010) -> console_register_read(0x10) -> 1 -> access->Data
+// The emulator then places 1 in the guest's destination register and advances RIP.
+// QUEUE_NOTIFY follows the write path; its value is a queue number, never the text to print.
+static HRESULT CALLBACK memory(void *context, WHV_EMULATOR_MEMORY_ACCESS_INFO *access) {
+  struct vm *vm = context;
+  uint64_t address = access->GpaAddress;
+  unsigned size = access->AccessSize;
+  bool write = access->Direction != 0;
+  if (!size || size > sizeof access->Data) return E_INVALIDARG;
+  // The instruction emulator may fetch instruction/operand bytes from ordinary RAM.
+  if (in_ram(vm->ram, address, size)) {
+    if (write) memcpy(vm->ram.bytes + address, access->Data, size);
+    else memcpy(access->Data, vm->ram.bytes + address, size);
+    return S_OK;
+  }
+  if (size != 4 || (address & 3)) return E_INVALIDARG;
+  uint32_t value = le32(access->Data);
+  bool handled = false;
+  if (address >= VIRTIO_CONSOLE_START && address - VIRTIO_CONSOLE_START < 4096)
+    handled = write ? console_register_write(vm->console, (unsigned)(address - VIRTIO_CONSOLE_START), value) :
+        console_register_read(vm->console, (unsigned)(address - VIRTIO_CONSOLE_START), &value);
+  else if (address >= IO_APIC_DEFAULT_PHYS_BASE && address - IO_APIC_DEFAULT_PHYS_BASE < 4096)
+    handled = pc_mmio(vm->pc, (unsigned)(address - IO_APIC_DEFAULT_PHYS_BASE), write, &value);
+  if (!handled) {
+    fprintf(stderr, "unhandled MMIO %s at GPA 0x%" PRIx64 "\n", write ? "write" : "read", address);
+    return E_FAIL;
+  }
+  if (!write) store32(access->Data, value);
+  return S_OK;
 }
 
 // A legacy PIC interrupt is an ExtINT event, with the vector the PIC selected.
@@ -1050,6 +1135,8 @@ static bool cpuid(struct vm *vm, const WHV_RUN_VP_EXIT_CONTEXT *exit) {
 }
 
 // Wake the VP loop every millisecond so it can service the PIT, even while the guest is halted.
+//   timer helper: wait -> WHvCancelRunVirtualProcessor -> wait again
+//   VP thread:    canceled exit -> pc_tick(now_ns) -> deliver interrupts -> run again
 // This helper never touches guest RAM or device state. Cleanup joins it before deleting VP 0.
 static DWORD WINAPI timer_thread(void *context) {
   struct vm *vm = context;
@@ -1060,24 +1147,6 @@ static DWORD WINAPI timer_thread(void *context) {
     HRESULT result = event == WAIT_OBJECT_0 + 1 ? WHvCancelRunVirtualProcessor(vm->partition, 0, 0) : E_FAIL;
     if (FAILED(result)) { InterlockedExchange(&vm->timer_error, result); return 1; }
   }
-}
-
-static bool read_image(const char *path, struct image *image) {
-  FILE *file = fopen(path, "rb");
-  if (!file) { perror(path); return false; }
-  bool success = false;
-  uint8_t *bytes = NULL;
-  if (fseek(file, 0, SEEK_END) != 0) goto done;
-  long size = ftell(file);
-  if (size <= 0 || (unsigned long)size > RAM_SIZE || fseek(file, 0, SEEK_SET) != 0) goto done;
-  bytes = malloc((size_t)size);
-  if (!bytes || fread(bytes, 1, (size_t)size, file) != (size_t)size) goto done;
-  *image = (struct image){bytes, (size_t)size};
-  success = true;
-done:
-  if (!success) { fprintf(stderr, "cannot read %s (expected 1..512 MiB)\n", path); free(bytes); }
-  fclose(file);
-  return success;
 }
 
 int main(int argc, char **argv) {

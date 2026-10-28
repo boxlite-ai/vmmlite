@@ -35,8 +35,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -61,8 +61,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 93,
-          "line_end": 126,
+          "line_start": 142,
+          "line_end": 170,
           "symbol": "pc",
           "tokens": [
             "struct pic",
@@ -75,8 +75,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 932,
-          "line_end": 969,
+          "line_start": 1049,
+          "line_end": 1087,
           "symbol": "memory",
           "tokens": [
             "pc_port",
@@ -102,8 +102,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1128,
-          "line_end": 1140,
+          "line_start": 1205,
+          "line_end": 1209,
           "symbol": "WHvMapGpaRange",
           "tokens": [
             "vm.ram.bytes",
@@ -128,8 +128,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -154,8 +154,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1113,
-          "line_end": 1123,
+          "line_start": 1182,
+          "line_end": 1192,
           "symbol": "WHvX64LocalApicEmulationModeXApic",
           "tokens": [
             "WHvX64LocalApicEmulationModeXApic"
@@ -179,8 +179,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1128,
-          "line_end": 1140,
+          "line_start": 1205,
+          "line_end": 1209,
           "symbol": "WHvMapGpaRange",
           "tokens": [
             "vm.ram.bytes",
@@ -207,8 +207,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1108,
-          "line_end": 1140,
+          "line_start": 1182,
+          "line_end": 1209,
           "symbol": "WHvCreatePartition",
           "tokens": [
             "WHvCreatePartition",
@@ -254,8 +254,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1108,
-          "line_end": 1140,
+          "line_start": 1182,
+          "line_end": 1209,
           "symbol": "WHvCreatePartition",
           "tokens": [
             "WHvCreatePartition",
@@ -267,8 +267,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1113,
-          "line_end": 1123,
+          "line_start": 1182,
+          "line_end": 1192,
           "symbol": "WHvX64LocalApicEmulationModeXApic",
           "tokens": [
             "WHvX64LocalApicEmulationModeXApic"
@@ -315,8 +315,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1230,
-          "line_end": 1251,
+          "line_start": 1299,
+          "line_end": 1319,
           "symbol": "WHvRunVirtualProcessor",
           "tokens": [
             "vm.partition, 0, &exit",
@@ -344,8 +344,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 897,
-          "line_end": 906,
+          "line_start": 1019,
+          "line_end": 1028,
           "symbol": "interrupt",
           "tokens": [
             "WHvRequestInterrupt",
@@ -374,8 +374,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1128,
-          "line_end": 1140,
+          "line_start": 1205,
+          "line_end": 1209,
           "symbol": "WHvMapGpaRange",
           "tokens": [
             "vm.ram.bytes",

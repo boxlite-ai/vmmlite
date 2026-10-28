@@ -35,8 +35,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 550,
-          "line_end": 589,
+          "line_start": 628,
+          "line_end": 661,
           "symbol": "console_transmit",
           "tokens": [
             "VIRTQ_AVAIL_F_NO_INTERRUPT",
@@ -62,8 +62,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 195,
-          "line_end": 223,
+          "line_start": 250,
+          "line_end": 278,
           "symbol": "ioapic_deliver",
           "tokens": [
             "pc->interrupt",
@@ -89,8 +89,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 897,
-          "line_end": 906,
+          "line_start": 1019,
+          "line_end": 1028,
           "symbol": "interrupt",
           "tokens": [
             "WHvRequestInterrupt",
@@ -116,8 +116,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 678,
-          "line_end": 683,
+          "line_start": 754,
+          "line_end": 759,
           "symbol": "pc_irq",
           "tokens": [
             "interrupt_status &=",
@@ -129,8 +129,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 226,
-          "line_end": 235,
+          "line_start": 282,
+          "line_end": 286,
           "symbol": "pc_eoi",
           "tokens": [
             "IOAPIC_REMOTE",
@@ -142,8 +142,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1249,
-          "line_end": 1251,
+          "line_start": 1318,
+          "line_end": 1319,
           "symbol": "pc_eoi",
           "tokens": [
             "exit.ApicEoi.InterruptVector"
@@ -169,8 +169,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 550,
-          "line_end": 589,
+          "line_start": 628,
+          "line_end": 661,
           "symbol": "console_transmit",
           "tokens": [
             "VIRTQ_AVAIL_F_NO_INTERRUPT",
@@ -183,8 +183,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 195,
-          "line_end": 223,
+          "line_start": 250,
+          "line_end": 278,
           "symbol": "ioapic_deliver",
           "tokens": [
             "pc->interrupt",
@@ -225,8 +225,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 897,
-          "line_end": 906,
+          "line_start": 1019,
+          "line_end": 1028,
           "symbol": "interrupt",
           "tokens": [
             "WHvRequestInterrupt",
@@ -261,8 +261,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 678,
-          "line_end": 683,
+          "line_start": 754,
+          "line_end": 759,
           "symbol": "pc_irq",
           "tokens": [
             "interrupt_status &=",
@@ -274,8 +274,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 226,
-          "line_end": 235,
+          "line_start": 282,
+          "line_end": 286,
           "symbol": "pc_eoi",
           "tokens": [
             "IOAPIC_REMOTE",
@@ -287,8 +287,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1249,
-          "line_end": 1251,
+          "line_start": 1318,
+          "line_end": 1319,
           "symbol": "pc_eoi",
           "tokens": [
             "exit.ApicEoi.InterruptVector"
@@ -323,8 +323,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 550,
-          "line_end": 589,
+          "line_start": 628,
+          "line_end": 661,
           "symbol": "console_transmit",
           "tokens": [
             "VIRTQ_AVAIL_F_NO_INTERRUPT",
@@ -353,8 +353,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 897,
-          "line_end": 906,
+          "line_start": 1019,
+          "line_end": 1028,
           "symbol": "interrupt",
           "tokens": [
             "WHvRequestInterrupt",
@@ -383,8 +383,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 897,
-          "line_end": 906,
+          "line_start": 1019,
+          "line_end": 1028,
           "symbol": "interrupt",
           "tokens": [
             "WHvRequestInterrupt",
@@ -413,8 +413,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 678,
-          "line_end": 683,
+          "line_start": 754,
+          "line_end": 759,
           "symbol": "pc_irq",
           "tokens": [
             "interrupt_status &=",
@@ -442,8 +442,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 226,
-          "line_end": 235,
+          "line_start": 282,
+          "line_end": 286,
           "symbol": "pc_eoi",
           "tokens": [
             "IOAPIC_REMOTE",
@@ -455,8 +455,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1249,
-          "line_end": 1251,
+          "line_start": 1318,
+          "line_end": 1319,
           "symbol": "pc_eoi",
           "tokens": [
             "exit.ApicEoi.InterruptVector"
@@ -483,8 +483,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 226,
-          "line_end": 235,
+          "line_start": 282,
+          "line_end": 286,
           "symbol": "pc_eoi",
           "tokens": [
             "IOAPIC_REMOTE",
@@ -496,8 +496,8 @@
           "state": "current",
           "revision": "WORKTREE",
           "path": "windows-x86_64/vmmlite.c",
-          "line_start": 1249,
-          "line_end": 1251,
+          "line_start": 1318,
+          "line_end": 1319,
           "symbol": "pc_eoi",
           "tokens": [
             "exit.ApicEoi.InterruptVector"

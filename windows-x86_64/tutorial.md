@@ -14,10 +14,10 @@ Windows boot trace. This code is for learning, not a sandbox for untrusted progr
 
 ### The machine at a glance
 
-Imagine the final line, `Hello from PID 1!`, crossing this machine. Linux puts
-18 bytes in RAM and writes a queue notification to `0xd0000050`. That write
-returns control to vmmlite, which reads the text and prints it in the Windows
-terminal. The following sections explain the parts needed to reach that point.
+Follow PID 1's `write()` through the machine. Linux's tty and virtio driver put
+output buffers in guest RAM and notify queue 1 at `0xd0000050`. vmmlite reads those
+buffers and prints them in the Windows terminal. The tty may split the write or
+translate its newline; the queue path is the same for each resulting buffer.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/machine/figure-blueprint.svg">
@@ -42,7 +42,7 @@ example asks KVM to create a complete interrupt-controller set and PIT. WHP's
 optional local APIC handles only the CPU-side controller. vmmlite supplies the
 PIC, IOAPIC and PIT itself. See Microsoft's [partition properties](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvpartitionpropertydatatypes).
 
-#### Compared with Firecracker
+#### Firecracker's machine, for comparison
 
 Both programs load a Linux kernel, provide guest RAM and respond to virtual-device
 accesses. Firecracker adds a broader machine and host isolation mechanisms. Its
@@ -174,26 +174,36 @@ has no Hyper-V guest ABI. It does not advertise KVM's paravirtual clock.
   <img alt="Each run takes a partition handle and VP index and fills a caller-owned exit context; WHP retains the VP register state." src="images/api/figure-editorial.svg">
 </picture>
 
-The host needs one partition handle and the processor index `0`. Unlike the
-KVM example, there is no VM file descriptor, vCPU file descriptor, or shared
-`kvm_run` mapping.
+The API has three objects to keep separate: the partition handle, processor index `0`, and a caller-owned exit report. The host's RAM allocation and instruction-emulator handle are separate resources.
 
-| Operation | Meaning in this program |
-| --- | --- |
-| `WHvGetCapability` | Check that the hypervisor and local APIC emulation are available |
-| `WHvCreatePartition` | Allocate an empty partition configuration |
-| `WHvSetPartitionProperty` | Select one processor, local APIC mode and CPUID exits |
-| `WHvSetupPartition` | Finish partition setup |
-| `WHvMapGpaRange` | Back guest addresses with the host's RAM allocation |
-| `WHvCreateVirtualProcessor` | Create virtual processor 0 |
-| `WHvSetVirtualProcessorRegisters` | Install the initial long-mode state |
-| `WHvRunVirtualProcessor` | Run until an exit needs host attention |
+| Object | Created by | How the code uses it |
+| --- | --- | --- |
+| `vm.partition` | `WHvCreatePartition` in §1 | Names the machine for mappings, VP operations and interrupt requests |
+| VP index `0` | `WHvCreateVirtualProcessor` in §7 | Selects the one CPU inside that partition; it is not a second handle |
+| `exit` | A local variable on each §8 iteration | Receives the exit reason, instruction context and reason-specific fields |
+| `vm.emulator` | `WHvEmulatorCreateEmulator` in §8 | Decodes IO/MMIO instructions using callbacks into this process |
 
-`WHvRunVirtualProcessor` fills an exit-context structure supplied by the caller.
-The exit reason selects which part of its union is meaningful. IO uses
-`IoPortAccess`; MMIO uses `MemoryAccess`. [Run API](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvrunvirtualprocessor)
+The setup order keeps configuration separate from execution:
 
-**In vmmlite:** `struct vm` owns the partition and instruction-emulator handles. §1 creates the partition, §7 creates VP 0, and §8 supplies a fresh exit-context buffer for each run.
+```text
+create partition -> set processor count, xAPIC and exit properties -> setup partition
+                 -> map guest RAM -> create VP 0 -> set entry registers -> run VP 0
+```
+
+`WHvRunVirtualProcessor(partition, 0, &exit, sizeof exit)` updates the supplied report. Its reason selects the meaningful part of the union:
+
+```text
+exit.ExitReason       -> choose the handler
+exit.VpContext        -> current RIP and instruction context
+exit.IoPortAccess     -> intercepted IN/OUT
+exit.MemoryAccess     -> intercepted memory access
+exit.CpuidAccess      -> guest inputs and WHP's default CPUID results
+exit.ApicEoi          -> vector whose service the guest ended
+```
+
+The VP's registers remain in WHP. `get_registers()` and `set_registers()` read or update that state; the report is not KVM's shared `kvm_run` page. [Run API](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/funcs/whvrunvirtualprocessor)
+
+**In vmmlite:** `struct vm` owns the host resources. §1 creates the partition, §7 creates VP 0, and §8 repeatedly supplies an exit report. Cleanup joins the timer helper before deleting resources it can still reach.
 
 #### 0.6 Device registers: I/O ports and MMIO
 
@@ -212,36 +222,41 @@ an event, and writing it can start work.
 | GPA `0xfec00000` | IOAPIC selector/window | `pc_mmio()` |
 | GPA `0xfee00000` | Local APIC | WHP |
 
-Two paths print text:
+Two concrete accesses show the difference between a register value and a queued payload. These are source walkthroughs.
 
 ```text
-early boot: OUT to port 0x3f8
-    -> WHP IO exit -> instruction emulator -> pc_port() -> com1() -> stdout
+UART write, with LCR.DLAB clear:
+  Linux: OUT 0x3f8, 'H'
+    -> WHP IO-port exit -> WHvEmulatorTryIoEmulation()
+    -> io(): port=0x3f8, size=1, write=true
+    -> pc_port() -> com1(UART_TX) -> stdout receives 'H'
 
-virtio: store queue number 1 at GPA 0xd0000050
-    -> WHP memory-access exit -> instruction emulator -> console_register_write()
-    -> read descriptors and buffers from guest RAM -> stdout
+Virtio feature read, after DEVICE_FEATURES_SEL=1:
+  Linux: 32-bit load at GPA 0xd0000010
+    -> WHP memory-access exit -> WHvEmulatorTryMmioEmulation()
+    -> memory() -> console_register_read(DEVICE_FEATURES) -> value 1
+    -> emulator updates the destination register and RIP
+    -> Linux sees bit 32, VIRTIO_F_VERSION_1
 ```
 
-The payload in the second path does not cross the MMIO register. The register
-contains a queue number. The descriptors tell the device where the payload is.
+A write of `1` to `QUEUE_NOTIFY` at `0xd0000050` uses that same MMIO path. The value selects queue 1. `console_transmit()` finds the text through descriptors in guest RAM (0.9).
 
-An MMIO instruction can use different operand sizes, registers and addressing
-modes. `WinHvEmulation` decodes and completes it. The callbacks supply device
-access, register access and guest-address translation. Our code checks both the
-HRESULT and `EmulationSuccessful`; success from the API call alone does not
-establish that the instruction completed. [Instruction emulation](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/funcs/whvemulatortryemulation)
+The UART names match the Linux and macOS sources. `UART_LSR_TEMT | UART_LSR_THRE = 0x60` says both transmit stages are empty. Setting `UART_LCR_DLAB` redirects registers 0 and 1 to the baud divisor: those writes must not print characters. `UART_IER_THRI` enables the TX-empty interrupt; reading `UART_IIR` acknowledges it.
 
-The emulator advances RIP for IO and MMIO. Our code advances RIP explicitly only
-for the CPUID exits it handles itself. Advancing RIP twice would skip a guest
-instruction; failing to advance it would repeat the same one.
+`WinHvEmulation` decodes the x86 instruction. The application supplies the pieces it cannot own:
 
-The memory callback also serves RAM: the emulator may fetch instruction or
-operand bytes while completing a device access. Unknown MMIO fails with a
-diagnostic. Absent ISA/PCI port reads return all ones; selected legacy ports have
-explicit minimal answers. [Emulator callbacks](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/funcs/whvemulatorcallbacks)
+| Callback | Responsibility |
+| --- | --- |
+| `get_registers()`, `set_registers()` | Read operands and commit the completed instruction's CPU state |
+| `translate()` | Translate a guest virtual page to a guest physical page |
+| `memory()` | Read/write ordinary RAM or dispatch a console/IOAPIC register access |
+| `io()` | Advance the PIT clock and dispatch a port access through `pc_port()` |
 
-**In vmmlite:** §8 registers `io()`, `memory()`, register access and translation callbacks with WinHvEmulation. The source comments list each device's register behavior beside its handler.
+One instruction may cause several callbacks, for example with a REP prefix. The memory callback also serves RAM when the emulator fetches instruction or operand bytes. Unknown MMIO fails with a diagnostic; absent ISA/PCI port reads return all ones.
+
+The host checks both HRESULT and `EmulationSuccessful`. The emulator completes IO/MMIO and updates RIP; `cpuid()` advances RIP itself. Incrementing it again after successful emulation would skip an instruction. [Instruction-emulation contract](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/funcs/whvemulatortryemulation), [callback structure](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/funcs/whvemulatorcallbacks)
+
+**In vmmlite:** §8 connects these callbacks to WinHvEmulation. Register tables sit beside the device handlers; the guest's queue data stays in shared RAM.
 
 #### 0.7 How the guest learns its hardware: MP table, ACPI and the command line
 
@@ -255,6 +270,25 @@ earlycon=uart8250,io,0x3f8 console=hvc0 panic=-1 reboot=k virtio_mmio.device=4K@
 The command line identifies COM1 and the virtio device. The MP table identifies
 one processor, one IOAPIC, an ISA bus, and the mapping from each ISA IRQ to an
 IOAPIC pin. These are descriptions, not executable firmware.
+
+The zero page, MP table and command line have different readers:
+
+| Data | Producer | Consumer / meaning |
+| --- | --- | --- |
+| Zero page at `0x7000` | `setup_zero_page()`, §4 | RSI tells the kernel where to find boot parameters |
+| E820 entries inside it | `setup_zero_page()`, §4 | Linux learns which backed bytes it may allocate |
+| `_MP_` → `PCMP` at `0x9fc00` | `setup_mptable()`, §5 | Linux discovers CPU 0, IOAPIC 1 and ISA routes |
+| Command line at `0x20000` | `setup_zero_page()`, §4 | The serial and virtio drivers learn console addresses |
+
+```text
+Linux scans for _MP_ -> follows PCMP -> finds ISA IRQ 5 -> IOAPIC pin 5
+Linux parses virtio_mmio.device -> probes 0xd0000000 -> binds console -> requests IRQ 5
+                               -> programs the IOAPIC route -> later consumes used buffers
+```
+
+The tables describe hardware; the helpers implement it. The macOS companion passes
+a device tree in `x0` for this role. Here, `RSI` points to boot parameters and Linux
+separately scans for the MP table. Neither example executes firmware.
 
 Three places must agree about the console:
 
@@ -325,6 +359,11 @@ service elapsed PIT deadlines. It never touches guest RAM or emulated-device
 state. Missed periods are coalesced into one interrupt request; this is a small
 teaching timer, not a precise virtual-time or migration model.
 
+```text
+timer helper: host timer expires -> WHvCancelRunVirtualProcessor -> waits again
+VP thread:    WHP run returns    -> pc_tick(now_ns) -> interrupt delivery -> run again
+```
+
 Linux's [local APIC calibration](https://github.com/torvalds/linux/blob/v6.12/arch/x86/kernel/apic/apic.c#L830-L950)
 can wait for a global tick or a known TSC interval and can check the result against
 a global clockevent. This is why a native boot test must exercise timing, even
@@ -334,80 +373,87 @@ after unit tests establish the PIT register behavior.
 
 #### 0.9 Virtqueues: setup, then data through shared memory
 
-**Setup, through registers.** Linux probes the magic/version/device ID, resets
-Status, sets ACKNOWLEDGE and DRIVER, accepts VERSION_1, and checks FEATURES_OK.
-For each queue it selects a size and three addresses, then sets QueueReady.
-After DRIVER_OK, the console can transmit. Queue 0's notifications leave its
-receive buffers untouched. This is the source's expected handshake, not a measured
-count of MMIO exits on Windows.
+A split virtqueue has three areas in guest RAM. Registers configure those areas; a notification says there is work to consume. The text itself never travels in the notification.
 
-**Data, through guest RAM.**
+The setup below follows this implementation. It is not a captured Windows trace or a fixed count of Linux register accesses.
 
-The driver configures three regions in guest RAM:
-
-| Region | Written by | Meaning |
+| Phase | Guest action | vmmlite's response |
 | --- | --- | --- |
-| Descriptor table | Linux | Each entry names a buffer address, length, flags and optional next descriptor |
-| Available ring | Linux | Entries name descriptor-chain heads that the device may consume |
-| Used ring | vmmlite | Entries return completed chain heads to Linux |
+| Identify | Read magic, version and device ID | Return `"virt"`, modern MMIO version 2 and console ID 3 |
+| Reset | Write `STATUS = 0` | Clear queues, features and pending interrupt; lower IRQ 5 |
+| Claim | Write status 1, then 3 | Record ACKNOWLEDGE and DRIVER |
+| Negotiate | Select feature page 1; accept its bit 0 | Offer only overall bit 32, `VIRTIO_F_VERSION_1` |
+| Accept features | Set FEATURES_OK, status `0xb`, then read it back | Keep FEATURES_OK only if accepted features equal the offered set |
+| Configure queues | Select queue 0 or 1; write size and descriptor/available/used GPAs | Retain both queue descriptions |
+| Enable queue | Write `QUEUE_READY = 1` | Check accepted features, power-of-two size, alignment and RAM bounds |
+| Start | Set DRIVER_OK, status `0xf` | Permit TX when queue 1 is also ready |
+| Notify | Write queue number to `QUEUE_NOTIFY` | Queue 1 drains TX; queue 0 leaves receive buffers untouched |
 
-Queue 0 is receive; this example has no input source, so its buffers remain
-available. Queue 1 is transmit. The device advertises only `VIRTIO_F_VERSION_1`;
-it does not negotiate indirect descriptors, packed rings or event-index
-notifications. [Virtio console and split queues](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
+Both queue descriptions are retained on WHP; the macOS and Linux teaching examples retain only transmit state. None supplies an input source. No packed rings, indirect descriptors, multiport control queues or event-index feature is offered.
 
-For the PID 1 line, an illustrative queue state is:
+| Area | Writer | Layout for a queue of `size` entries |
+| --- | --- | --- |
+| Descriptor table | Guest | `16 * size` bytes, aligned to 16; each entry is `{address, length, flags, next}` |
+| Available ring | Guest | `6 + 2 * size` bytes, aligned to 2; flags, index, head array and unused event field |
+| Used ring | Device | `6 + 8 * size` bytes, aligned to 4; flags, index, `{id, len}` array and unused event field |
+
+The bounds checks reserve the trailing event fields, but EVENT_IDX is not negotiated. The 16-bit indices count entries and wrap at 65536; a slot is `index % size`. Queue size is a power of two up to 256.
+
+A concrete example comes from `virtio()` in [the portable production-code tests](tests/machine_test.c). It uses a size-8 queue, with descriptor/available/used areas at `0x1000/0x2000/0x3000`:
 
 ```text
-before notification                           after completion
-available.idx = 38                            available.idx = 38
-next_avail = 37                           next_avail = 38
-available.ring[37] = 12                        used.ring[37] = {id: 12, len: 0}
-descriptor[12] = {                            used.idx = 38
-  addr: 0x00800000,
-  len: 18,
-  flags: 0
-}
-RAM[0x00800000] = "Hello from PID 1!\n"         stdout receives those 18 bytes
+guest RAM before the kick                     device result
+desc[0] = {0x7000, 6, NEXT, 1}                 output: "Hello WHP!\n" (11 bytes)
+desc[1] = {0x7100, 5, 0,    0}                 used.ring[0] = {id: 0, len: 0}
+RAM[0x7000] = "Hello "                        used.idx = 1
+RAM[0x7100] = "WHP!\n"                        next_avail = next_used = 1
+avail.ring[0] = 0; avail.idx = 1               InterruptStatus = 1
+                  QUEUE_NOTIFY = 1 -------->  IRQ 5 -> configured vector 0x45
 ```
 
-The used length is zero because the device did not write bytes into a transmit
-buffer. The text length remains in the descriptor; the host's TX counter records
-the number printed.
+Those addresses and vector belong to the test fixture, not a native Linux boot. The test calls the production register handler, records output bytes and interrupt requests, and inspects the used ring.
 
-`console_transmit()` first validates a chain. It rejects out-of-RAM buffers, invalid
-indices, writable or indirect TX descriptors, and chains that cycle. Only then
-does it print the buffers and publish a used entry. The available-index distance
-must fit the queue capacity. Indices wrap at 16 bits, which the tests exercise.
+The completion path has five steps:
 
-The whole operation runs while VP 0 is stopped. Unlike the KVM example, a queue-1
-kick reaches §8 and there is no console worker, ioeventfd or irqfd. A second VP or
-an asynchronous device worker would require synchronization of ring publication.
+1. Validate the entire descriptor chain before printing any of its buffers.
+2. Read each buffer from guest RAM and send its bytes to the output callback.
+3. Write `{head, 0}` to the used ring. Length is zero because TX reads guest buffers; it writes no bytes into them.
+4. Advance `next_avail`, `next_used` and the published used index.
+5. After draining new chains, set interrupt status and raise IRQ 5 unless the available-ring flags suppress notification.
 
-**In vmmlite:** `console_register_write()` handles `QUEUE_NOTIFY`; `console_transmit()` validates and consumes chains, publishes used entries, then raises `VIRTIO_CONSOLE_IRQ` unless the available ring requests `VIRTQ_AVAIL_F_NO_INTERRUPT`. `INTERRUPT_ACK` lowers the line. Linux can reclaim completed buffers from the used ring without an interrupt.
+A malformed chain produces no output or used entry for that chain. Previously completed chains remain completed. Out-of-range indices, writable/indirect TX descriptors, cycles and buffers outside RAM stop the operation.
+
+A guest can reclaim buffers by reading the used ring before handling an interrupt. `INTERRUPT_ACK` lowers the device line; LAPIC EOI separately ends interrupt service (0.8). PID 1 writes 18 application bytes, but the tty can split a write or translate its newline; one write does not guarantee one descriptor or interrupt.
+
+| Boundary | Linux/KVM example | macOS example | WHP example |
+| --- | --- | --- | --- |
+| Queue-1 kick | KVM ioeventfd wakes `console_thread()` | MMIO exit calls `console_kick()` | MMIO exit calls `console_transmit()` |
+| Data access | Console worker reads guest RAM | Stopped-vCPU handler reads guest RAM | Stopped-VP handler reads guest RAM |
+| Completion | Used ring, then irqfd | Used ring, then framework GIC | Used ring, then software IOAPIC and WHP LAPIC |
+
+**In vmmlite:** the control path is `console_register_read/write()`; the data path is `console_transmit()`. VP 0 stays stopped throughout the callback, and the timer helper never touches rings. Adding a second VP or device worker would require synchronization. [Virtio split rings, MMIO and console](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 
 ### 1. How vmmlite boots Linux
 
-Nine steps; the § signs say where each lives in `vmmlite.c`. Section 1.1 maps
-where everything lands in memory. This sequence describes the code, not a recorded
-native Windows run.
+The eight banners in `main()` prepare and run the machine. Guest actions happen
+inside §8; they are not additional setup sections. This is a source walkthrough.
 
 ```text
-    vmmlite (Windows process)                         guest
-    -------------------------                         -----
- 1  §1 partition, xAPIC; PIC, IOAPIC, PIT state
- 2  §2-6 RAM, console state, kernel, zero page,
-       initramfs, MP table, GDT, page tables
- 3  §7 VP 0: long mode, RIP=0x100200, RSI=0x7000
- 4  §8 WHvRunVirtualProcessor() --------------------> decompressor: unpack vmlinux
- 5  com1(): print byte              <-- OUT 0x3f8 --- early printk on COM1
- 6  com1(): 0x60 = transmitter ready --- IN 0x3fd --> is COM1 free?
- 7  console_register_*(): answer,   <-- MMIO -------- virtio drivers set up hvc0
-       keep both queue descriptions
- 8  console_transmit(): print,     <-- kick queue 1 - hvc0: printk and /init's write(1)
-       return buffers, raise IRQ 5 --- IRQ 5 ------> completion handler
- 9  §8: stop helper, release VM    <-- OUT 0x64=0xfe  reboot via i8042
-       and return 0
+host setup
+  §1 partition + xAPIC + PC devices
+  §2 mapped RAM + console
+  §3 bzImage payload
+  §4 zero page + command line + initramfs + E820
+  §5 MP table
+  §6 GDT + page tables
+  §7 VP 0 + long-mode registers
+  §8 run loop ------------------------------------------> Linux decompressor
+       com1() <---------------------- port IO ------------ early kernel output
+       console_register_*() <-------- MMIO -------------- hvc0 driver setup
+       console_transmit() <---------- QUEUE_NOTIFY=1 ----- output buffers
+       used ring + optional IRQ 5 ----------------------> reclaim buffers
+       pc_port(): reset=true <------- OUT 0x64=0xfe ------ reboot
+       stop helper -> release VM -> return 0
 ```
 
 | § | Step | WHP calls / source |
@@ -491,24 +537,34 @@ Try it: predict the effect before running on a WHP host.
 
 ### 2. The code
 
-The numbered banners in [vmmlite.c](vmmlite.c) are the §1–§8 used throughout this
-article. The device helpers come before `main()`, followed by the loader and WHP
-callbacks. The complete host implementation is this one C file.
+The numbered banners in [vmmlite.c](vmmlite.c) are the §1–§8 used throughout this article. Start at `main()` for the boot sequence, then follow each helper when you reach it. Everything remains in one C file.
 
 #### 2.1 vmmlite.c
 
-Read [vmmlite.c](vmmlite.c) beside the eight-step table above. The file opens with
-the whole-machine diagram and named addresses. Its PIC, IOAPIC, PIT, COM1 and
-virtio sections include the register tables and paths the guest follows.
+The file follows the same reading pattern as the Linux and macOS examples: named addresses, small utilities, device models, boot preparation and the numbered entry point.
 
-The `VMMLITE_TEST` guard excludes only Windows API code and host `main()` from the
-portable test build. [tests/machine_test.c](tests/machine_test.c) includes the same
-source and calls its real loader/device helpers; it does not implement substitute
-devices. It assembles the same four preparation calls as §3–§6.
+| Source group | Question it answers |
+| --- | --- |
+| Guest bytes and host files | How does a guest address become a bounded host-memory access? |
+| PIC and IOAPIC | Which pending line can reach the CPU, and when can it be delivered again? |
+| PIT and COM1 | How do early timing and serial output work before virtio is ready? |
+| Port dispatch | Which device owns an IN/OUT, including the reset command? |
+| Virtio console | How do register setup and shared-memory completion fit together? |
+| Boot data and initial CPU state | What goes in guest RAM, and what goes in WHP's register state? |
+| WHP runtime callbacks | Who completes instructions, injects interrupts and wakes the run loop? |
+| `main()`, §1–§8 | In which order are the machine and its resources assembled? |
 
-Cleanup first signals and joins the timer helper. It then destroys the emulator,
-releases devices, deletes VP 0, unmaps RAM, deletes the partition and frees memory.
-The helper must stop before the WHP resources it can access are released.
+The `VMMLITE_TEST` guards leave out Windows host APIs and `main()`. [tests/machine_test.c](tests/machine_test.c) includes the production source and exercises its actual loader and device helpers, including the §3–§6 preparation sequence.
+
+Ownership is deliberately narrow:
+
+```text
+VP thread:    guest RAM, device state, output and all queue completion
+timer helper: wait for a host timer -> cancel WHP run -> VP thread services PIT
+shutdown:     signal helper -> join -> destroy emulator/devices/VP -> unmap/free RAM
+```
+
+The helper must finish before the partition or VP is deleted. This order also applies when setup stops partway through.
 
 #### 2.2 init.c (the guest's PID 1)
 
@@ -519,18 +575,9 @@ reset command that `pc_port()` recognizes.
 
 ### 3. Build, run and verification
 
-The original article includes a captured KVM boot log. This WHP version has no
-native boot capture yet; the table below keeps the evidence separate.
-
-| Environment | Observed work | What it establishes |
-| --- | --- | --- |
-| macOS ARM64, Zig 0.16.0 | Windows x64 PE cross-build | The single source compiles and links against WHP/WinHvEmulation |
-| macOS ARM64, ASan/UBSan | Portable production-code tests | Loader layout and malformed-input checks; PIC/IOAPIC, PIT/UART and virtio contracts |
-| macOS ARM64, Ubuntu `6.8.0-147-generic` bzImage | Load image and initramfs into RAM | Header acceptance and placement; no guest instructions run |
-| Native Windows x64 | **Pending** | Initial CPU-state acceptance, interrupt/timer delivery and Linux boot remain unverified |
-
-The [README](README.md) contains prerequisites, kernel configuration and exact
-commands. The short sequence is:
+Start with the [build prerequisites and kernel requirements](README.md#run-it):
+Zig, GNU Make and a native C compiler for the portable checks; `cpio` for the guest
+archive. The Linux kernel must be an x86_64 bzImage with built-in virtio-console support.
 
 ```sh
 # On the build machine, from windows-x86_64/:
@@ -539,30 +586,40 @@ make guest
 make check-image KERNEL=/path/to/bzImage
 ```
 
+Copy `vmmlite.exe`, the supported `bzImage`, `initramfs.cpio` and `test-boot.ps1`
+to a WHP-enabled Windows 11 x64 host. From that directory:
+
 ```powershell
-# On a WHP-enabled Windows 11 x64 host:
 .\vmmlite.exe --probe
-.\test-boot.ps1 -Kernel C:\guests\bzImage -Initramfs C:\guests\initramfs.cpio
+.\test-boot.ps1 -Kernel .\bzImage -Initramfs .\initramfs.cpio
 ```
 
-The expected final guest message is:
+The [Makefile](Makefile) builds the host and guest separately. The [native harness](test-boot.ps1)
+requires the PID 1 greeting, nonzero virtio TX, guest reset and exit 0 within its timeout.
+It retains stdout, stderr, Windows version and artifact hashes.
+
+**Native Windows/WHP boot remains pending.** These observations have different scopes:
+
+| Environment | Observed work | What it establishes |
+| --- | --- | --- |
+| macOS ARM64, Zig 0.16.0 | Windows x64 PE cross-build | The single source compiles and links against WHP/WinHvEmulation |
+| macOS ARM64, ASan/UBSan | Portable production-code tests | Loader layout and malformed-input checks; PIC/IOAPIC, PIT/UART and virtio contracts |
+| macOS ARM64, Ubuntu `6.8.0-147-generic` bzImage | Load image and initramfs into RAM | Header acceptance and placement; no guest instructions run |
+| Native Windows x64 | **Pending** | Initial CPU-state acceptance, interrupt/timer delivery and Linux boot remain unverified |
+
+The host-side real-image loading result was recorded before this readability revision;
+it is not a new Windows boot result. The portable check is rerun for code revisions.
+
+Expected final guest message, not yet captured on WHP:
 
 ```text
 Hello from PID 1!
 ```
 
-That line is **not yet captured from this WHP implementation**. The native test
-also requires a successful process exit and a nonzero virtio transmit count.
-It records the Windows version, executable/kernel/initramfs hashes and both
-output streams. A timeout or guest reboot without the PID 1 message is a failed
-acceptance test.
-
-The portable tests establish narrower facts: the loader produces the intended
-memory layout; the device models react to register operations; malformed queue
-chains stop before completion; and used-ring indices survive wraparound. A PE
-build establishes that the Windows code compiles and links against the supplied
-headers/import libraries. Neither proves that WHP accepts the initial CPU state
-or that Linux's timing and interrupt paths work on a Windows host.
+A reboot alone is insufficient: a panic can also reset the guest. The portable
+tests exercise production loader/device helpers and malformed inputs; cross-building
+checks Windows headers and linking. Native register acceptance, timer/interrupt
+delivery and Linux boot still require the Windows harness.
 
 ### 4. Why it looks like this
 
@@ -596,6 +653,7 @@ tracks that remaining acceptance step.
 **Original structure and guest contract**
 
 - [vmmlite.c at c4bd3f4](https://github.com/boxlite-ai/vmmlite/blob/c4bd3f4f3a9317ea6d97b78d83c7368f2a0a85f4/vmmlite.c): device comments, diagrams and eight boot sections
+- [macOS source at b301f5f](https://github.com/boxlite-ai/vmmlite/blob/b301f5fbd808b1602b26ff5dcdf24d2281121ac6/macos/vmmlite.c): named UART registers, local flow comments and eight boot steps
 - [Original README](https://github.com/boxlite-ai/vmmlite/blob/c4bd3f4f3a9317ea6d97b78d83c7368f2a0a85f4/README.md): Run it, How it works, Tested on, Learn more, License
 
 **Comparison**
