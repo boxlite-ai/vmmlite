@@ -1,5 +1,5 @@
 // vmmlite.c: a tiny VMM that boots Linux (AArch64, KVM). For learning only.
-// Build: make    Run: .build/vmmlite Image .build/initramfs.cpio .build/machine.dtb
+// Build and run: see README.md.
 //
 //   vmmlite (this process)       KVM (host kernel)                ARM64 CPU
 //   +--------------------+ ioctl +-----------------------+ entry +--------------------+
