@@ -4,6 +4,18 @@
 
 One C file builds an ARM64 KVM machine, boots Linux, prints from PID 1 through a virtio console, and exits on PSCI reset. The walkthrough follows the x86 example, with the ARM boot contract made explicit.
 
+## Details
+
+Read the machine overview first, then choose a route:
+
+| You want to understand | Start here |
+| --- | --- |
+| What the CPU and KVM provide | Background 0.1–0.5. |
+| How Linux discovers and uses devices | Background 0.6–0.9. |
+| The order that makes the machine boot | Section 1 and the matching nine steps in `main()`. |
+| The actual implementation | Section 2: complete source and platform files. |
+| How to reproduce the observed boot | Section 3: commands, captured output and failure checks. |
+
 ## The machine at a glance
 
 The host is an AArch64 Linux system. The guest is another AArch64 Linux system. The VMM is a normal host process; it supplies memory and device behavior, while KVM and the CPU execute the guest.
@@ -425,9 +437,15 @@ The notification's value is a queue number, not a descriptor index or byte count
 
 The worker takes an acquire snapshot of `avail.idx`, checks that the advance is no larger than the queue, then walks each submitted chain. It copies a descriptor once into a local value, validates its range and direction, and caps the chain length at the queue size. A malformed cycle cannot make the host walk forever.
 
-For each chain it writes a used entry, increments its own `q->next`, then release-stores the new used index. Publishing the index last prevents the guest from treating an incomplete entry as completed. The VMM does not use a guest-modified `used.idx` to choose a host write position.
+For each chain it writes a used entry, increments its own `queue->next`, then release-stores the new used index. Publishing the index last prevents the guest from treating an incomplete entry as completed. The VMM does not use a guest-modified `used.idx` to choose a host write position.
 
 Ring slots wrap at N. The 16-bit producer/consumer counters wrap at 65536. These are different kinds of wrapping. Subtracting the counters as `uint16_t` gives the modulo-65536 distance; taking `% N` chooses a slot. Native tests cover both behaviors.
+
+For example, take a four-entry queue with `queue->next = 7` and `avail.idx = 8`.
+There is one pending chain. The worker reads `avail.ring[7 % 4]`, slot 3, to find
+its head descriptor. After printing the chain, it writes `{head, 0}` to used slot 3,
+increments its counter to 8, and release-publishes `used.idx = 8`. The next slot is
+`8 % 4 = 0`; no address or descriptor number comes from the eventfd count.
 
 There are two concurrency boundaries:
 
@@ -480,29 +498,38 @@ reboot(RB_AUTOBOOT) -> PSCI SYSTEM_RESET -> KVM system event -> exit 0
 
 ### 1.1 Where everything lands: the guest memory map
 
-Addresses below are guest physical addresses, not host pointers.
+Addresses below are guest physical addresses, not host pointers. High addresses are
+at the top, as in the x86 and macOS walkthroughs; gaps are not drawn to scale.
 
 ```text
-0x08000000  +------------------------------+
-            | GIC distributor: 64 KiB       | KVM device
-0x08010000  +------------------------------+
-0x09000000  | UART: 8 bytes                 | userspace MMIO
-0x0a000000  | virtio console: 4 KiB          | MMIO + doorbell binding
-0x10000000  | GIC redistributor: 128 KiB     | KVM device
-0x10020000  +------------------------------+
-            | unmapped address-space gap   |
-0x40000000  +==============================+ RAM begins (2 MiB aligned)
-            | Image at header.text_offset  |
-            | reserved header.image_size   |
-            | remaining free space         |
-0x48000000  +------------------------------+
-            | DTB; 2 MiB editing capacity  |
-0x48200000  +------------------------------+
-            | remaining free space         |
-0x50000000  +------------------------------+
-            | initramfs.cpio containing init|
-            | remaining free space         |
-0x60000000  +==============================+ RAM ends (exclusive)
+0x60000000  +--------------------------------+ RAM ends (exclusive)
+            | remaining free RAM             |
+            | initramfs.cpio containing /init |
+0x50000000  +--------------------------------+ initramfs begins
+            | free RAM                        |
+0x48200000  +--------------------------------+
+            | DTB; 2 MiB editing capacity     |
+0x48000000  +--------------------------------+ x0 points here
+            | free RAM                        |
+            | Image's reserved image_size     |
+            | Image at RAM_BASE + text_offset |
+0x40000000  +================================+ RAM begins (2 MiB aligned)
+            | unmapped address-space gap      |
+0x10020000  +--------------------------------+
+            | GIC redistributor: 128 KiB      | KVM device
+0x10000000  +--------------------------------+
+            | unmapped gap                    |
+0x0a001000  +--------------------------------+
+            | virtio console: 4 KiB           | MMIO + doorbell binding
+0x0a000000  +--------------------------------+
+            | unmapped gap                    |
+0x09000008  +--------------------------------+
+            | UART: 8 bytes                   | userspace MMIO
+0x09000000  +--------------------------------+
+            | unmapped gap                    |
+0x08010000  +--------------------------------+
+            | GIC distributor: 64 KiB         | KVM device
+0x08000000  +--------------------------------+
 ```
 
 The loader temporarily reads the Image at the start of RAM, inspects its 64-byte header and moves it to `RAM_BASE + text_offset`. The header's `image_size` is a reserved footprint, not merely the number of bytes in the file. The loader rejects an Image whose reserved footprint would overlap the DTB.
@@ -515,10 +542,38 @@ The pinned Image uses text offset zero. Another compatible Image may use a diffe
 
 The source below is the complete standalone example. The shared guest remains at the repository root. Platform files stay in `linux-aarch64/`; `macos/` keeps its existing name and implementation.
 
+Start at `main()` to see the nine boot steps in order. Then follow the helper for
+the boundary you want to understand:
+
+| Source group | Contract to look for | Background |
+| --- | --- | --- |
+| Memory and loading | A guest address becomes a checked host pointer; the Image's reserved footprint stays clear of the DTB. | 0.3, 1.1 |
+| UART | DLAB changes the meaning of offsets 0/1; IER and IIR determine a level interrupt. | 0.6, 0.8 |
+| Virtio queue and registers | Registers configure the queue; descriptors carry bytes; used entries return ownership. | 0.6, 0.9 |
+| Worker and eventfd wiring | The doorbell wakes a host worker; irqfd targets a GIC SPI; a mutex protects host state. | 0.5, 0.8–0.9 |
+| Machine description | DT cells use big endian; CPU affinity and timer INTIDs come from KVM. | 0.7–0.8 |
+| Main steps 1–9 | Setup order, Linux entry, MMIO completion, PSCI exit, then join before unmap. | 1 |
+
+The code uses Linux's `VIRTIO_MMIO_*`, `VIRTIO_CONFIG_S_*`, and `VRING_DESC_F_*`
+names, also used by the x86 example. The adjacent tables keep their numerical meaning
+visible. It intentionally remains one file: a reader can trace the complete boot
+without learning a shared platform framework.
+
 ### 2.1 vmmlite.c
 
 ```c
-// A small ARM64 Linux/KVM boot machine. For learning only; see README.md.
+// vmmlite.c: a tiny VMM that boots Linux (AArch64, KVM). For learning only.
+// Build: make    Run: .build/vmmlite Image .build/initramfs.cpio .build/machine.dtb
+//
+//   vmmlite (this process)       KVM (host kernel)                ARM64 CPU
+//   +--------------------+ ioctl +-----------------------+ entry +--------------------+
+//   | ram: guest RAM     |------>| VM: memory slots,     |------>| runs guest Linux   |
+//   | run: exit record   |<------| GICv3, timers; vCPU    |<------| until a VM exit    |
+//   +--------------------+ exits +-----------------------+ exit  +--------------------+
+//
+// Read main() for the nine boot steps. Helpers explain memory/loading, UART registers,
+// the virtio output queue, eventfds, and the device tree in that order.
+// Same print-and-reboot endpoint as macOS/x86: one CPU, 512 MiB, no input/disk/network.
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -528,6 +583,10 @@ The source below is the complete standalone example. The shared guest remains at
 #include <libfdt.h>
 #include <linux/kvm.h>
 #include <linux/serial_reg.h>
+#include <linux/virtio_config.h> // status and feature bits, as in the Linux x86 example
+#include <linux/virtio_ids.h>
+#include <linux/virtio_mmio.h>   // VIRTIO_MMIO_* register offsets
+#include <linux/virtio_ring.h>   // descriptor flags: NEXT, WRITE, INDIRECT
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -542,28 +601,22 @@ The source below is the complete standalone example. The shared guest remains at
 
 // Guest physical addresses: RAM is backed by mmap; device windows are not RAM.
 // KVM handles GIC accesses internally. UART and virtio control accesses return to mmio().
-#define RAM_BASE UINT64_C(0x40000000)
-#define RAM_SIZE (512UL << 20)
-#define DTB_BASE UINT64_C(0x48000000)
-#define DTB_SIZE (2UL << 20)
-#define INITRD_BASE UINT64_C(0x50000000)
-#define UART_BASE UINT64_C(0x09000000)
-#define GICD_BASE UINT64_C(0x08000000)
-#define GICR_BASE UINT64_C(0x10000000)
-#define UART_IRQ 32
-#define CONSOLE_BASE UINT64_C(0x0a000000)
+#define RAM_BASE UINT64_C(0x40000000)     // 1 GiB, aligned to the Image's 2 MiB requirement
+#define RAM_SIZE (512UL << 20)           // RAM ends at 0x60000000, exclusive
+#define DTB_BASE UINT64_C(0x48000000)     // x0 points here at kernel entry
+#define DTB_SIZE (2UL << 20)             // libfdt workspace, not the packed blob size
+#define INITRD_BASE UINT64_C(0x50000000)  // cpio archive with the shared /init
+#define UART_BASE UINT64_C(0x09000000)    // eight byte-wide 8250 registers
+#define GICD_BASE UINT64_C(0x08000000)    // distributor: shared interrupts, 64 KiB
+#define GICR_BASE UINT64_C(0x10000000)    // one redistributor: private interrupts, 128 KiB
+#define UART_IRQ 32                     // architectural INTID 32 = DT SPI 0
+#define CONSOLE_BASE UINT64_C(0x0a000000) // 4 KiB virtio-MMIO window
 #define CONSOLE_GSI 1 // ARM irqfd route pin 1 means GIC INTID 33.
 #define QUEUE_MAX 256
-enum { MAGIC_VALUE = 0x000, VERSION = 0x004, DEVICE_ID = 0x008,
-       DEVICE_FEATURES = 0x010, DEVICE_FEATURES_SEL = 0x014,
-       DRIVER_FEATURES = 0x020, DRIVER_FEATURES_SEL = 0x024,
-       QUEUE_SEL = 0x030, QUEUE_NUM_MAX = 0x034, QUEUE_NUM = 0x038, QUEUE_READY = 0x044,
-       QUEUE_NOTIFY = 0x050, INTERRUPT_STATUS = 0x060, INTERRUPT_ACK = 0x064,
-       STATUS = 0x070, QUEUE_DESC_LOW = 0x080, QUEUE_AVAIL_LOW = 0x090, QUEUE_USED_LOW = 0x0a0 };
 #define CORE(name) (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | KVM_REG_ARM_CORE_REG(name))
 
-static unsigned char *ram;
-static int vm;
+static unsigned char *ram; // host pointer; guest physical addresses need guest() translation
+static int vm;            // VM fd; com1() uses it to drive the UART's interrupt line
 static void require(int ok, const char *why) {
   if (!ok) { fprintf(stderr, "vmmlite: %s\n", why); exit(1); }
 }
@@ -576,6 +629,9 @@ static int checked_ioctl(int fd, unsigned long request, uintptr_t arg, const cha
 #define FDT(call) do { int r = (call); if (r < 0) { \
   fprintf(stderr, "%s: %s\n", #call, fdt_strerror(r)); exit(1); } } while (0)
 
+// Memory and loading ----------------------------------------------------------------
+// Guest physical address -> offset in RAM -> host pointer:
+//   0x40001000           -> 0x1000        -> ram + 0x1000
 // Subtract before comparing: address + size could wrap near UINT64_MAX.
 static void *guest(uint64_t address, size_t size) {
   require(address >= RAM_BASE && size <= RAM_SIZE &&
@@ -583,6 +639,8 @@ static void *guest(uint64_t address, size_t size) {
   return ram + (address - RAM_BASE);
 }
 
+// Load a whole file into its assigned region; capacity keeps it out of the next one.
+// Fatal errors end this one-shot process; there is no reusable VM lifecycle API.
 static size_t load(const char *path, void *destination, size_t capacity) {
   FILE *file = fopen(path, "rb");
   if (!file) { perror(path); exit(1); }
@@ -595,16 +653,24 @@ static size_t load(const char *path, void *destination, size_t capacity) {
   return size;
 }
 
-// Raw ARM64 Image header (all little endian):
-//   +8 text_offset: distance from the 2 MiB-aligned RAM base
-//  +16 image_size: reserved footprint, including bytes not stored in the file
-//  +24 flags bit 0: big endian; +56 magic: 41 52 4d 64
-// The pinned Image has offset zero. Never assume x86 bzImage or an offset of 0x80000.
-// Reserve the entire footprint before the DTB, then move the loaded file into place.
+// Raw ARM64 Image header: the input is already uncompressed, unlike x86's bzImage.
+//
+//   offset  field        meaning (header fields are little endian)
+//    0      code0/code1  executable instructions; PC starts at the Image's first byte
+//    8      text_offset  distance from a 2 MiB-aligned RAM base
+//   16      image_size   reserved footprint, including bytes not stored in the file
+//   24      flags        bit 0 selects big endian, unsupported here
+//   56      magic        41 52 4d 64: "ARM" followed by byte 0x64
+//
+// file -> ram (temporary) -> memmove to ram + text_offset (final)
+// Reserve the whole image_size before the DTB. The pinned Image uses text_offset=0;
+// do not assume the often-seen 0x80000 offset. Linux creates its own page tables.
 static uint64_t kernel_entry(size_t file_size) {
   uint64_t offset, image_size, flags;
   require(file_size >= 64 && !memcmp(ram + 56, "ARM\x64", 4), "expected an uncompressed ARM64 Image");
-  memcpy(&offset, ram + 8, 8); memcpy(&image_size, ram + 16, 8); memcpy(&flags, ram + 24, 8);
+  memcpy(&offset, ram + 8, 8);
+  memcpy(&image_size, ram + 16, 8);
+  memcpy(&flags, ram + 24, 8);
   require(image_size && !(flags & 1), "need a modern little-endian Image");
   require(offset < DTB_BASE - RAM_BASE && image_size >= file_size &&
           image_size <= DTB_BASE - RAM_BASE - offset, "kernel overlaps device tree");
@@ -612,10 +678,19 @@ static uint64_t kernel_entry(size_t file_size) {
   return RAM_BASE + offset;
 }
 
-// 8250 subset: TX writes print bytes; LSR reports an empty transmitter.
-// DLAB selects baud-divisor registers, so those writes must not print characters.
-// Enabling THRI or transmitting raises a pending empty event; IIR acknowledges it.
-// IRQ_LINE uses ARM's SPI type plus the architectural INTID, not an irqfd GSI.
+// UART ------------------------------------------------------------------------------
+// The 8250 subset used by earlycon and Linux's OF serial driver (ttyS0).
+//
+//   offset  register    guest reads                         guest writes
+//   0       RX / TX     zero: no input                      print byte; mark TX empty
+//   1       IER         saved interrupt-enable bits         save IER; THRI enables TX IRQ
+//   2       IIR / FCR   pending THRI, else NO_INT            ignored: no FIFO
+//   3       LCR         saved line control                  save LCR, including DLAB
+//   5       LSR         TEMT | THRE: transmitter empty     ignored
+//
+// DLAB=1 selects baud-divisor bytes at offsets 0/1; those writes must not print.
+// TX-empty event + IER.THRI -> INTID 32 high -> read IIR -> clear event and lower line.
+// KVM_IRQ_LINE takes the ARM SPI encoding plus INTID 32, unlike irqfd's routing pin.
 static unsigned char com1(int reg, int is_out, unsigned char byte) {
   static unsigned char ier, lcr, thr_empty;
   unsigned char reply = 0;
@@ -645,110 +720,149 @@ static void event_signal(int fd) {
   require(!result, "eventfd write failed");
 }
 
+// Virtio console --------------------------------------------------------------------
 // Modern virtio-mmio console: queue 0 (input) is advertised but deliberately unused.
 // Queue 1 (output) owns three guest-memory areas: descriptors, available ring, used ring.
 // Control writes and the worker share console_lock. The mutex does not stop the guest:
 // acquire/release ordering separately implements the virtqueue publication protocol.
-struct queue { uint32_t size, ready; uint64_t desc, avail, used; uint16_t next; };
+// Each address below is a guest physical address, not a host pointer.
+struct queue {
+  uint32_t size, ready;
+  uint64_t desc, avail, used;
+  uint16_t next; // next available entry to consume; also our used-ring producer index
+};
 static struct {
   struct queue transmit;
   uint32_t selected, feature_page, driver_page, status, interrupt;
   uint64_t features;
 } console;
+// One 16-byte descriptor, little endian like this host and guest. Only NEXT is accepted:
+// WRITE would let the device write guest memory; INDIRECT would require another table.
 struct descriptor { uint64_t address; uint32_t length; uint16_t flags, next; };
 
-// Table: 16*N bytes / 16-byte alignment. Avail: 6+2*N / 2. Used: 6+8*N / 4.
-// Direct readable descriptors only; VERSION_1 is the only advertised feature.
-static void queue_check(struct queue *q) {
-  require(q->size && q->size <= QUEUE_MAX && !(q->size & (q->size - 1)), "invalid queue size");
-  require(!(q->desc & 15) && !(q->avail & 1) && !(q->used & 3), "unaligned queue");
-  guest(q->desc, 16 * q->size); guest(q->avail, 6 + 2 * q->size); guest(q->used, 6 + 8 * q->size);
+//   area   bytes      alignment  contents
+//   desc   16*N       16         {address, length, flags, next} for each buffer
+//   avail  6+2*N       2         flags, idx, N head IDs, optional used_event
+//   used   6+8*N       4         flags, idx, N {id,length} entries, optional avail_event
+// VERSION_1 is the only feature; the trailing EVENT_IDX fields are not used.
+static void queue_check(struct queue *queue) {
+  require(queue->size && queue->size <= QUEUE_MAX && !(queue->size & (queue->size - 1)), "invalid queue size");
+  require(!(queue->desc & 15) && !(queue->avail & 1) && !(queue->used & 3), "unaligned queue");
+  guest(queue->desc, 16 * queue->size);
+  guest(queue->avail, 6 + 2 * queue->size);
+  guest(queue->used, 6 + 8 * queue->size);
 }
 
-// Linux fills buffers -> publishes avail.idx -> rings QueueNotify with value 1.
-// Read each descriptor once, bound the chain, print bytes, then publish completion.
-// q->next is our own 16-bit counter; the guest cannot choose our used-ring write slot.
+// Linux: text -> desc[head] -> avail.ring[slot] -> avail.idx -> QueueNotify=1
+// Worker: acquire avail.idx -> copy/validate chain -> fwrite(text) -> used.ring[slot]
+//         -> release used.idx -> signal irqfd -> GIC INTID 33
+// Completion length is zero: output reads guest bytes, writes none into those buffers.
+// queue->next is our own 16-bit counter; the guest cannot choose our used-ring write slot.
 // The eventfd counter counts notifications, not descriptors. One kick may cover many.
-static void console_kick(uint32_t number) {
-  if (number != 1) return;
-  struct queue *q = &console.transmit;
-  if (!q->ready || !(console.status & 4)) return; // A delayed eventfd kick can follow reset.
-  queue_check(q);
-  uint16_t *avail = guest(q->avail, 6 + 2 * q->size);
-  uint16_t *used = guest(q->used, 6 + 8 * q->size);
-  uint16_t end = __atomic_load_n(&avail[1], __ATOMIC_ACQUIRE);
-  if (end == q->next) return;
-  require((uint16_t)(end - q->next) <= q->size, "available ring overrun");
-  while (q->next != end) {
-    uint16_t head = avail[2 + q->next % q->size], index = head;
+static void console_kick(uint32_t queue_number) {
+  if (queue_number != 1) return;
+  struct queue *queue = &console.transmit;
+  // A delayed eventfd kick can follow reset; do not revisit the old queue addresses.
+  if (!queue->ready || !(console.status & VIRTIO_CONFIG_S_DRIVER_OK)) return;
+  queue_check(queue);
+  uint16_t *avail = guest(queue->avail, 6 + 2 * queue->size);
+  uint16_t *used = guest(queue->used, 6 + 8 * queue->size);
+  uint16_t available_end = __atomic_load_n(&avail[1], __ATOMIC_ACQUIRE);
+  if (available_end == queue->next) return;
+  require((uint16_t)(available_end - queue->next) <= queue->size, "available ring overrun");
+  while (queue->next != available_end) {
+    uint16_t head = avail[2 + queue->next % queue->size], index = head;
     for (unsigned walked = 0;; walked++) {
-      require(index < q->size && walked < q->size, "invalid or cyclic descriptor chain");
-      struct descriptor d;
-      memcpy(&d, guest(q->desc + 16 * index, sizeof d), sizeof d);
-      require(!(d.flags & ~1u), "transmit descriptor must be readable and direct");
-      require(fwrite(guest(d.address, d.length), 1, d.length, stdout) == d.length, "console write failed");
-      if (!(d.flags & 1)) break;
-      index = d.next;
+      require(index < queue->size && walked < queue->size, "invalid or cyclic descriptor chain");
+      struct descriptor descriptor;
+      memcpy(&descriptor, guest(queue->desc + 16 * index, sizeof descriptor), sizeof descriptor);
+      require(!(descriptor.flags & ~(unsigned)VRING_DESC_F_NEXT), "transmit descriptor must be readable and direct");
+      require(fwrite(guest(descriptor.address, descriptor.length), 1, descriptor.length, stdout) == descriptor.length, "console write failed");
+      if (!(descriptor.flags & VRING_DESC_F_NEXT)) break;
+      index = descriptor.next;
     }
     uint32_t completion[] = {head, 0};
-    memcpy((char *)used + 4 + 8 * (q->next % q->size), completion, sizeof completion);
-    q->next++;
-    __atomic_store_n(&used[1], q->next, __ATOMIC_RELEASE);
+    memcpy((char *)used + 4 + 8 * (queue->next % queue->size), completion, sizeof completion);
+    queue->next++;
+    __atomic_store_n(&used[1], queue->next, __ATOMIC_RELEASE);
   }
   require(!fflush(stdout), "console flush failed");
-  console.interrupt |= 1;
+  console.interrupt |= VIRTIO_MMIO_INT_VRING;
   event_signal(irq_fd);
 }
 
-// Register offsets follow Virtio 1.2 section 4.2.2; unknown reads return zero.
+// Register access, serialized with the worker by mmio()'s console_lock.
+// Offsets/names come from linux/virtio_mmio.h (Virtio 1.2 section 4.2.2):
+//
+//   offset      register suffix       role
+//   000/004/008 MAGIC/VERSION/ID      identify virtio-MMIO v2, console device 3
+//   010/014     DEVICE_FEATURES/SEL   offer VERSION_1, bit 0 of feature page 1
+//   020/024     DRIVER_FEATURES/SEL   save the features accepted by Linux
+//   030/034/038 QUEUE_SEL/MAX/NUM     choose queue; maximum and configured length
+//   044         QUEUE_READY          validate geometry before enabling output
+//   050         QUEUE_NOTIFY         queue number; KVM intercepts value 1 via ioeventfd
+//   060/064     INTERRUPT_STATUS/ACK report/clear used-buffer bit; separate from GIC EOI
+//   070         STATUS               feature negotiation, DRIVER_OK, or reset to zero
+//   080/090/0a0 QUEUE_*_LOW          64-bit addresses split into low/high words (+4)
+//
+// Unknown reads return zero. Queue 0 stays advertised but unserved, as in the siblings.
 // FEATURES_OK is accepted only when VERSION_1 (feature bit 32) was negotiated.
 // Queue addresses stay fixed while ready. STATUS=0 resets all device/queue state.
 static uint32_t console_register_read(unsigned reg) {
-  struct queue *q = console.selected == 1 ? &console.transmit : NULL;
+  struct queue *queue = console.selected == 1 ? &console.transmit : NULL;
   switch (reg) {
-  case MAGIC_VALUE: return 0x74726976;
-  case VERSION: return 2;
-  case DEVICE_ID: return 3;
-  case DEVICE_FEATURES: return console.feature_page == 1 ? 1 : 0;
-  case QUEUE_NUM_MAX: return console.selected < 2 ? QUEUE_MAX : 0;
-  case QUEUE_READY: return q ? q->ready : 0;
-  case INTERRUPT_STATUS: return console.interrupt;
-  case STATUS: return console.status;
+  case VIRTIO_MMIO_MAGIC_VALUE: return 0x74726976;
+  case VIRTIO_MMIO_VERSION: return 2;
+  case VIRTIO_MMIO_DEVICE_ID: return VIRTIO_ID_CONSOLE;
+  case VIRTIO_MMIO_DEVICE_FEATURES: return console.feature_page == 1 ? 1 : 0;
+  case VIRTIO_MMIO_QUEUE_NUM_MAX: return console.selected < 2 ? QUEUE_MAX : 0;
+  case VIRTIO_MMIO_QUEUE_READY: return queue ? queue->ready : 0;
+  case VIRTIO_MMIO_INTERRUPT_STATUS: return console.interrupt;
+  case VIRTIO_MMIO_STATUS: return console.status;
   default: return 0;
   }
 }
 
 static void console_register_write(unsigned reg, uint32_t value) {
-  struct queue *q = console.selected == 1 ? &console.transmit : NULL;
+  struct queue *queue = console.selected == 1 ? &console.transmit : NULL;
   switch (reg) {
-  case DEVICE_FEATURES_SEL: console.feature_page = value; break;
-  case DRIVER_FEATURES_SEL: console.driver_page = value; break;
-  case DRIVER_FEATURES:
+  case VIRTIO_MMIO_DEVICE_FEATURES_SEL: console.feature_page = value; break;
+  case VIRTIO_MMIO_DRIVER_FEATURES_SEL: console.driver_page = value; break;
+  case VIRTIO_MMIO_DRIVER_FEATURES:
     if (console.driver_page < 2) {
       unsigned shift = 32 * console.driver_page;
       console.features = (console.features & ~(UINT64_C(0xffffffff) << shift)) | ((uint64_t)value << shift);
     }
     break;
-  case QUEUE_SEL: console.selected = value; break;
-  case QUEUE_NOTIFY: console_kick(value); break;
-  case INTERRUPT_ACK:
+  case VIRTIO_MMIO_QUEUE_SEL: console.selected = value; break;
+  case VIRTIO_MMIO_QUEUE_NOTIFY: console_kick(value); break;
+  case VIRTIO_MMIO_INTERRUPT_ACK:
     console.interrupt &= ~value;
     break;
-  case STATUS:
-    if (!value) { memset(&console, 0, sizeof console); }
+  case VIRTIO_MMIO_STATUS:
+    if (!value) memset(&console, 0, sizeof console);
     else {
-      if ((value & 8) && console.features != (UINT64_C(1) << 32)) value &= ~8u;
-      require(!(value & 4) || (value & 8), "DRIVER_OK without accepted features");
+      if ((value & VIRTIO_CONFIG_S_FEATURES_OK) &&
+          console.features != (UINT64_C(1) << VIRTIO_F_VERSION_1))
+        value &= ~(unsigned)VIRTIO_CONFIG_S_FEATURES_OK;
+      require(!(value & VIRTIO_CONFIG_S_DRIVER_OK) || (value & VIRTIO_CONFIG_S_FEATURES_OK),
+              "DRIVER_OK without accepted features");
       console.status = value;
     }
     break;
-  case QUEUE_NUM: if (q && !q->ready) q->size = value; break;
-  case QUEUE_READY:
-    if (q) { require(value <= 1, "invalid QueueReady"); if (value) queue_check(q); q->ready = value; }
+  case VIRTIO_MMIO_QUEUE_NUM: if (queue && !queue->ready) queue->size = value; break;
+  case VIRTIO_MMIO_QUEUE_READY:
+    if (queue) {
+      require(value <= 1, "invalid QueueReady");
+      if (value) queue_check(queue);
+      queue->ready = value;
+    }
     break;
   default:
-    if (q && !q->ready && reg >= QUEUE_DESC_LOW && reg <= QUEUE_USED_LOW + 4 && !(reg & 3)) {
-      uint64_t *address = reg < QUEUE_AVAIL_LOW ? &q->desc : reg < QUEUE_USED_LOW ? &q->avail : &q->used;
+    if (queue && !queue->ready && reg >= VIRTIO_MMIO_QUEUE_DESC_LOW &&
+        reg <= VIRTIO_MMIO_QUEUE_USED_LOW + 4 && !(reg & 3)) {
+      uint64_t *address = reg < VIRTIO_MMIO_QUEUE_AVAIL_LOW ? &queue->desc :
+                          reg < VIRTIO_MMIO_QUEUE_USED_LOW ? &queue->avail : &queue->used;
       if ((reg & 15) == 0) *address = (*address & UINT64_C(0xffffffff00000000)) | value;
       if ((reg & 15) == 4) *address = (*address & UINT64_C(0xffffffff)) | ((uint64_t)value << 32);
     }
@@ -756,6 +870,7 @@ static void console_register_write(unsigned reg, uint32_t value) {
 }
 
 
+// Host notification path -------------------------------------------------------------
 // KVM consumes matched doorbell writes without returning a KVM_EXIT_MMIO to main.
 // This worker drains queue 1 while the guest may run on the vCPU thread.
 // stop_fd lets normal shutdown join the worker before RAM or descriptors disappear.
@@ -778,20 +893,25 @@ static void *console_thread(void *unused) {
 
 // Guest write 1 at 0x0a000050 -> ioeventfd -> worker -> used ring -> irqfd -> GIC.
 // ARM irqchip routing pin N targets INTID N+32. This is SPI 1 / INTID 33.
+//   machine.dts: <0 1 1>   SPI, relative number 1, edge rising
+//   route: GSI 1 -> pin 1 -> INTID 33; Linux assigns its own software IRQ number
 // machine.dts uses edge rising: ordinary irqfd pulses, with no resampling protocol.
 // The guest separately acknowledges console.interrupt and completes GIC handling.
 static void connect_console(void) {
-  kick_fd = eventfd(0, EFD_CLOEXEC); irq_fd = eventfd(0, EFD_CLOEXEC); stop_fd = eventfd(0, EFD_CLOEXEC);
+  kick_fd = eventfd(0, EFD_CLOEXEC);
+  irq_fd = eventfd(0, EFD_CLOEXEC);
+  stop_fd = eventfd(0, EFD_CLOEXEC);
   require(kick_fd >= 0 && irq_fd >= 0 && stop_fd >= 0, "creating eventfds failed");
   struct kvm_irq_routing *routes = calloc(1, sizeof *routes + sizeof routes->entries[0]);
   require(routes != NULL, "allocating IRQ route failed");
   routes->nr = 1;
   routes->entries[0] = (struct kvm_irq_routing_entry){.gsi = CONSOLE_GSI, .type = KVM_IRQ_ROUTING_IRQCHIP,
       .u.irqchip = {.irqchip = 0, .pin = CONSOLE_GSI}};
-  IOCTL(vm, KVM_SET_GSI_ROUTING, routes); free(routes);
+  IOCTL(vm, KVM_SET_GSI_ROUTING, routes);
+  free(routes);
   struct kvm_irqfd irq = {.fd = irq_fd, .gsi = CONSOLE_GSI};
   IOCTL(vm, KVM_IRQFD, &irq);
-  struct kvm_ioeventfd kick = {.datamatch = 1, .addr = CONSOLE_BASE + QUEUE_NOTIFY, .len = 4,
+  struct kvm_ioeventfd kick = {.datamatch = 1, .addr = CONSOLE_BASE + VIRTIO_MMIO_QUEUE_NOTIFY, .len = 4,
                               .fd = kick_fd, .flags = KVM_IOEVENTFD_FLAG_DATAMATCH};
   IOCTL(vm, KVM_IOEVENTFD, &kick);
 }
@@ -801,11 +921,20 @@ static void attribute(int fd, unsigned long operation, uint32_t group, uint64_t 
   IOCTL(fd, operation, &a);
 }
 
+// Machine description ----------------------------------------------------------------
 // dtc supplies structure; libfdt writes big-endian cells into that compiled template.
 // x0 names the DTB. /chosen carries bootargs and exclusive initramfs bounds.
 // Query CPU affinity and timer PPIs instead of assuming host allocation/CPU topology.
+//
+//   /chosen       initrd-start / initrd-end     start included, end excluded
+//   /cpus/cpu@0   reg                          MPIDR affinity bits, excluding flags
+//   /timer        interrupts                   <1, INTID-16, 4>: PPI, relative ID, level
+//
+// Timer tuples stay in binding order: secure physical, nonsecure physical, virtual,
+// hypervisor. Query the two EL1 timers used by this guest; keep the other template IDs.
 static void prepare_dtb(void *dtb, size_t dtb_size, size_t initrd_size, int cpu) {
-  FDT(fdt_check_full(dtb, dtb_size)); FDT(fdt_open_into(dtb, dtb, DTB_SIZE));
+  FDT(fdt_check_full(dtb, dtb_size));
+  FDT(fdt_open_into(dtb, dtb, DTB_SIZE));
   int chosen = fdt_path_offset(dtb, "/chosen");
   FDT(fdt_setprop_u64(dtb, chosen, "linux,initrd-start", INITRD_BASE));
   FDT(fdt_setprop_u64(dtb, chosen, "linux,initrd-end", INITRD_BASE + initrd_size));
@@ -839,14 +968,21 @@ static void mmio(struct kvm_run *run) {
   memcpy(&value, run->mmio.data, sizeof value);
   require(!pthread_mutex_lock(&console_lock), "console lock failed");
   if (run->mmio.is_write) console_register_write(address - CONSOLE_BASE, value);
-  else { value = console_register_read(address - CONSOLE_BASE); memcpy(run->mmio.data, &value, sizeof value); }
+  else {
+    value = console_register_read(address - CONSOLE_BASE);
+    memcpy(run->mmio.data, &value, sizeof value);
+  }
   require(!pthread_mutex_unlock(&console_lock), "console unlock failed");
 }
 
 int main(int argc, char **argv) {
   require(argc == 4, "usage: vmmlite Image initramfs.cpio machine.dtb (AArch64 Linux with /dev/kvm)");
   setbuf(stdout, NULL);
+
+  // --------------------------------------------------------------------------------
   // 1. Open KVM, check the ABI/capabilities, create the VM.
+  // kvm is the system fd; vm owns this machine's memory slots, vCPU and GIC device.
+  // PSCI supplies firmware calls; ioeventfd/irqfd supply the console notification path.
   int kvm = open("/dev/kvm", O_RDWR | O_CLOEXEC);
   if (kvm < 0) { perror("open /dev/kvm (need AArch64 KVM and read/write permission)"); return 1; }
   require(IOCTL(kvm, KVM_GET_API_VERSION, 0) == KVM_API_VERSION, "unsupported KVM API");
@@ -854,25 +990,42 @@ int main(int argc, char **argv) {
   require(IOCTL(kvm, KVM_CHECK_EXTENSION, KVM_CAP_IRQFD) &&
           IOCTL(kvm, KVM_CHECK_EXTENSION, KVM_CAP_IOEVENTFD), "KVM lacks irqfd/ioeventfd");
   vm = IOCTL(kvm, KVM_CREATE_VM, 0);
+
+  // --------------------------------------------------------------------------------
   // 2. Back 512 MiB of guest physical memory with this process's pages.
+  // mmap creates host memory. The memory slot tells KVM where it appears to Linux:
+  //   guest [0x40000000, 0x60000000) -> host [ram, ram + RAM_SIZE)
+  // Device addresses are outside this slot; they do not accidentally become RAM.
   ram = mmap(NULL, RAM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   require(ram != MAP_FAILED, "mapping guest RAM failed");
   struct kvm_userspace_memory_region memory = {
       .slot = 0, .guest_phys_addr = RAM_BASE, .memory_size = RAM_SIZE, .userspace_addr = (uintptr_t)ram};
   IOCTL(vm, KVM_SET_USER_MEMORY_REGION, &memory);
+
+  // --------------------------------------------------------------------------------
   // 3. Load the raw Image, root archive and device-tree template into separate regions.
+  // Image: RAM_BASE + header.text_offset, reserve header.image_size before the DTB.
+  // DTB: 0x48000000, at most 2 MiB. Initramfs: 0x50000000, up to RAM's exclusive end.
   uint64_t entry = kernel_entry(load(argv[1], ram, DTB_BASE - RAM_BASE));
-  size_t initrd = load(argv[2], guest(INITRD_BASE, 0), RAM_BASE + RAM_SIZE - INITRD_BASE);
+  size_t initrd_size = load(argv[2], guest(INITRD_BASE, 0), RAM_BASE + RAM_SIZE - INITRD_BASE);
   void *dtb = guest(DTB_BASE, DTB_SIZE);
   size_t dtb_size = load(argv[3], dtb, DTB_SIZE);
 
+  // --------------------------------------------------------------------------------
   // 4. Create one native-target vCPU and ask KVM to implement PSCI firmware calls.
+  // The preferred target comes from KVM, not an invented CPU model. VCPU_INIT installs
+  // the reset state, including the disabled guest MMU; step 6 sets our Linux entry state.
   int cpu = IOCTL(vm, KVM_CREATE_VCPU, 0);
   struct kvm_vcpu_init init = {0};
   IOCTL(vm, KVM_ARM_PREFERRED_TARGET, &init);
   init.features[0] |= 1u << KVM_ARM_VCPU_PSCI_0_2;
   IOCTL(cpu, KVM_ARM_VCPU_INIT, &init);
+
+  // --------------------------------------------------------------------------------
   // 5. Create GICv3. Initialize only after vCPU creation; these addresses match the DTS.
+  // 64 INTIDs = 16 SGIs + 16 PPIs + 32 SPIs. The distributor routes shared device IRQs;
+  // one redistributor holds this CPU's private state. KVM supplies the CPU interface.
+  // KVM's order differs from macOS, where framework GIC creation precedes the vCPU.
   struct kvm_create_device gic = {.type = KVM_DEV_TYPE_ARM_VGIC_V3};
   IOCTL(vm, KVM_CREATE_DEVICE, &gic);
   uint64_t distributor = GICD_BASE, redistributor = GICR_BASE;
@@ -881,8 +1034,19 @@ int main(int argc, char **argv) {
   attribute(gic.fd, KVM_SET_DEVICE_ATTR, KVM_DEV_ARM_VGIC_GRP_ADDR, KVM_VGIC_V3_ADDR_TYPE_REDIST, &redistributor);
   attribute(gic.fd, KVM_SET_DEVICE_ATTR, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, &nr_irqs);
   attribute(gic.fd, KVM_SET_DEVICE_ATTR, KVM_DEV_ARM_VGIC_GRP_CTRL, KVM_DEV_ARM_VGIC_CTRL_INIT, NULL);
+
+  // --------------------------------------------------------------------------------
   // 6. Finish the machine description and install the ARM64 boot register contract.
-  prepare_dtb(dtb, dtb_size, initrd, cpu);
+  //
+  //   register     value               meaning
+  //   PC           Image entry         first instruction, calculated in step 3
+  //   x0           0x48000000          physical address of the packed DTB
+  //   x1-x3        zero                reserved by Linux's ARM64 boot protocol
+  //   PSTATE       0x3c5               DAIF masks set, EL1h (kernel uses SP_EL1)
+  //
+  // Linux creates page tables and exception vectors before enabling its MMU/IRQs.
+  // KVM_SET_ONE_REG takes a register ID and a host pointer to the value, not the value.
+  prepare_dtb(dtb, dtb_size, initrd_size, cpu);
   uint64_t ids[] = {CORE(regs.pc), CORE(regs.pstate), CORE(regs.regs[0]),
                     CORE(regs.regs[1]), CORE(regs.regs[2]), CORE(regs.regs[3])};
   uint64_t values[] = {entry, 0x3c5, DTB_BASE, 0, 0, 0}; // EL1h; D, A, I, F masked; MMU off after INIT.
@@ -890,27 +1054,58 @@ int main(int argc, char **argv) {
     struct kvm_one_reg r = {.id = ids[i], .addr = (uintptr_t)&values[i]};
     IOCTL(cpu, KVM_SET_ONE_REG, &r);
   }
+
+  // --------------------------------------------------------------------------------
   // 7. Map the shared exit record; connect eventfds and start the console worker.
+  // The vCPU fd's mapping contains struct kvm_run, not guest RAM. KVM writes exits
+  // here; userspace supplies MMIO read data before reentering. Ask KVM for its size.
+  // Register the route/irqfd/doorbell before running Linux, so no kick is lost at boot.
   size_t run_size = IOCTL(kvm, KVM_GET_VCPU_MMAP_SIZE, 0);
   struct kvm_run *run = mmap(NULL, run_size, PROT_READ | PROT_WRITE, MAP_SHARED, cpu, 0);
   require(run != MAP_FAILED, "mapping kvm_run failed");
   connect_console();
   pthread_t worker;
   require(!pthread_create(&worker, NULL, console_thread, NULL), "starting console worker failed");
+
+  // --------------------------------------------------------------------------------
   // 8. Enter Linux. KVM handles timers/GIC/PSCI; userspace handles device MMIO.
+  //
+  //   exit                     action
+  //   KVM_EXIT_MMIO            UART or virtio control register: mmio(), then reenter
+  //   KVM_EXIT_SYSTEM_EVENT    PSCI SHUTDOWN/RESET: finish this one-shot VM
+  //   other                    report an unsupported exit and terminate
+  //
+  // A queue-1 doorbell normally wakes the worker without returning here. KVM finishes
+  // trapped load/store instructions; unlike the macOS loop, do not advance PC by hand.
   for (;;) {
-    if (ioctl(cpu, KVM_RUN, 0) < 0) { if (errno == EINTR) continue; perror("KVM_RUN"); return 1; }
+    if (ioctl(cpu, KVM_RUN, 0) < 0) {
+      if (errno == EINTR) continue;
+      perror("KVM_RUN");
+      return 1;
+    }
     if (run->exit_reason == KVM_EXIT_MMIO) { mmio(run); continue; }
     if (run->exit_reason == KVM_EXIT_SYSTEM_EVENT &&
         (run->system_event.type == KVM_SYSTEM_EVENT_SHUTDOWN || run->system_event.type == KVM_SYSTEM_EVENT_RESET)) break;
-    fprintf(stderr, "unexpected KVM exit %u\n", run->exit_reason); return 1;
+    fprintf(stderr, "unexpected KVM exit %u\n", run->exit_reason);
+    return 1;
   }
+
+  // --------------------------------------------------------------------------------
   // 9. PSCI reset/off ends this one-shot VM; stop the worker before releasing memory.
+  // stop_fd wakes a worker blocked in poll(). join is the lifetime boundary: afterward
+  // no worker can follow a queue pointer into RAM or signal an eventfd we are closing.
   event_signal(stop_fd);
   require(!pthread_join(worker, NULL), "joining console worker failed");
   fprintf(stderr, "guest requested PSCI shutdown/reset\n");
-  munmap(run, run_size); close(cpu); close(gic.fd); close(vm); close(kvm); munmap(ram, RAM_SIZE);
-  close(kick_fd); close(irq_fd); close(stop_fd);
+  munmap(run, run_size);
+  close(cpu);
+  close(gic.fd);
+  close(vm);
+  close(kvm);
+  munmap(ram, RAM_SIZE);
+  close(kick_fd);
+  close(irq_fd);
+  close(stop_fd);
   return 0;
 }
 ```
@@ -1073,6 +1268,12 @@ CONFIG_VIRTIO_MMIO=y         CONFIG_VIRTIO_CONSOLE=y
 A different kernel must have these facilities built in, since this initramfs has no modules or module loader. Use `make run KERNEL=/path/to/Image` for an alternative compatible raw Image; the pinned checksum applies only to the bundled download target.
 
 **Verified 2026-10-27:** the VMM was compiled and executed on Ubuntu 24.04 AArch64 with host kernel `6.8.0-138-generic`, inside an Apple Virtualization.framework VM with nested virtualization enabled. The program opened and ran through `/dev/kvm`. This is hardware-assisted nested KVM evidence; it is not a bare-metal test or QEMU software CPU emulation result.
+
+The readability revision was retested on 2026-10-28 in the same AArch64 nested-KVM
+environment: the native helper checks, three complete boots, timed wakeup, 300 ordered
+writes and malformed-input checks passed. The executable's compiled `.text` section
+also matched the pre-refactor baseline byte for byte. The boot excerpt below remains
+the original observation; its timestamps are not a benchmark.
 
 `make test` passed three independent boots, a guest that sleeps for 250 ms and then prints 300 ordered lines, production-helper tests for bounds/UART/virtqueues/MMIO, and executable checks for malformed Images and DTBs. Every boot was bounded by a 30-second timeout and required a zero process exit, the expected console transition and exactly one guest success message. The timer test checks measured guest elapsed time, not just a host delay.
 

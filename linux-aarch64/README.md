@@ -8,6 +8,25 @@ and exits when the guest requests PSCI reset. `macos/` remains the Apple Silicon
 Read the [full walkthrough](docs/walkthrough.md) for the machine diagrams, ARM64 boot
 contract, annotated source, and captured boot output.
 
+## Read the example
+
+Start with the nine numbered steps in [vmmlite.c](vmmlite.c), then read the helper
+for the step you want to understand. The file follows the same teaching structure
+as `macos/` and `linux-x86_64/`: an ownership sketch, device/register tables, and a
+boot sequence whose order remains visible in `main()`.
+
+| Question | Read |
+| --- | --- |
+| Where does the kernel go? | `guest()`, `load()`, `kernel_entry()` and steps 2–3. |
+| Why are there two consoles? | `com1()` for early UART bytes; `console_kick()` for hvc0 buffers. |
+| How does a guest write reach stdout? | Queue layout, register access, `console_thread()`, `connect_console()`. |
+| Who owns interrupts and timers? | `prepare_dtb()` and steps 4–6; KVM supplies GICv3/timers. |
+| What happens after reset? | Steps 8–9; stop and join the worker before releasing RAM. |
+
+The [walkthrough](docs/walkthrough.md#2-the-code) follows this source map and includes
+the complete files. Linux UAPI names identify virtio registers and bits; comments
+explain the protocol, ownership, and ordering rather than restating each assignment.
+
 ## Build and run
 
 Use a little-endian AArch64 Linux host with GICv3, PSCI support, and read/write access to
@@ -49,6 +68,9 @@ Verified on 2026-10-27: Ubuntu 24.04 AArch64, host kernel 6.8.0-138-generic, wit
 hardware-assisted nested KVM inside an Apple Virtualization.framework VM. All three
 UART-to-hvc0 boots and the timer/output guest passed using the pinned Linux 6.1.102 Image. This
 is actual `/dev/kvm` execution, not a bare-metal result or software CPU emulation.
+
+The readability revision passed the same suite on 2026-10-28. Its compiled `.text`
+section was byte-identical to the pre-refactor baseline with GCC `-O2`.
 
 ## Limits
 

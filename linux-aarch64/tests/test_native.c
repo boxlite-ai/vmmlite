@@ -29,7 +29,7 @@ int test_ioctl(int fd, unsigned long request, ...) {
   }
   if (request == KVM_IOEVENTFD) {
     struct kvm_ioeventfd *r = argument;
-    assert(r->addr == CONSOLE_BASE + QUEUE_NOTIFY && r->len == 4 && r->datamatch == 1);
+    assert(r->addr == CONSOLE_BASE + VIRTIO_MMIO_QUEUE_NOTIFY && r->len == 4 && r->datamatch == 1);
     assert(r->flags == KVM_IOEVENTFD_FLAG_DATAMATCH && r->fd == kick_fd);
     return 0;
   }
@@ -178,15 +178,15 @@ static void uart_test(void) {
 static void receive_ignored_test(void) {
   setup_queue();
   struct queue before = console.transmit;
-  console_register_write(QUEUE_SEL, 0);
-  assert(console_register_read(QUEUE_NUM_MAX) == QUEUE_MAX);
-  console_register_write(QUEUE_NUM, 512);
-  set_address(QUEUE_DESC_LOW, UINT64_MAX);
-  console_register_write(QUEUE_READY, 1);
+  console_register_write(VIRTIO_MMIO_QUEUE_SEL, 0);
+  assert(console_register_read(VIRTIO_MMIO_QUEUE_NUM_MAX) == QUEUE_MAX);
+  console_register_write(VIRTIO_MMIO_QUEUE_NUM, 512);
+  set_address(VIRTIO_MMIO_QUEUE_DESC_LOW, UINT64_MAX);
+  console_register_write(VIRTIO_MMIO_QUEUE_READY, 1);
   console_kick(0);
   assert(!memcmp(&before, &console.transmit, sizeof before));
-  console_register_write(QUEUE_SEL, 1);
-  assert(console_register_read(QUEUE_READY) == 1);
+  console_register_write(VIRTIO_MMIO_QUEUE_SEL, 1);
+  assert(console_register_read(VIRTIO_MMIO_QUEUE_READY) == 1);
 }
 
 int main(int argc, char **argv) {
