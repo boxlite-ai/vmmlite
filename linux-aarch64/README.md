@@ -18,33 +18,22 @@ Install the dependencies on Ubuntu/Debian:
 sudo apt-get install build-essential libfdt-dev device-tree-compiler cpio curl
 ```
 
-From the repository root, run these commands in one shell. The VMM, compiled device
-tree, static guest program, initramfs and kernel are written to a temporary directory.
+From the repository root:
 
 ```sh
-set -eu
-cd linux-aarch64
-build_dir=$(mktemp -d /tmp/vmmlite-linux-aarch64.XXXXXX)
-
-gcc -O2 -g -Wall -Wextra -Werror vmmlite.c -lfdt -pthread -o "$build_dir/vmmlite"
-dtc -I dts -O dtb -o "$build_dir/machine.dtb" machine.dts
-gcc -O2 -g -Wall -Wextra -Werror -static -o "$build_dir/init" ../init.c
-(cd "$build_dir" && printf 'init\n' | cpio -o -H newc > initramfs.cpio)
-
-curl -fL --retry 2 --connect-timeout 30 --max-time 180 \
-  -o "$build_dir/Image.tmp" \
-  https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/aarch64/vmlinux-6.1.102
-printf 'c16c673b970b92a57b6afc0721c79cb90503900b5928c887f1f5eee508d3920a  %s\n' \
-  "$build_dir/Image.tmp" | sha256sum -c -
-mv "$build_dir/Image.tmp" "$build_dir/Image"
-
-"$build_dir/vmmlite" "$build_dir/Image" "$build_dir/initramfs.cpio" "$build_dir/machine.dtb"
+make build:linux-aarch64
+make kernel:linux-aarch64
+make run:linux-aarch64
 ```
 
-The download is the same Linux 6.1.102 ARM64 fixture used by `macos/`. Despite its
-upstream filename `vmlinux`, it is a raw `Image`, not ELF. The commands check its
-SHA-256 before using it. To use another compatible raw Image, replace
-`"$build_dir/Image"` in the final command with its path.
+The root [Makefile](../Makefile) builds the VMM, compiles [machine.dts](machine.dts),
+and packs the static guest [init.c](../init.c). Generated files stay in
+`.build/linux-aarch64/`; the platform directory keeps only its three source files.
+
+`make kernel:linux-aarch64` downloads the same Linux 6.1.102 ARM64 fixture used by
+[macos-arm64/](../macos-arm64/README.md) and checks its SHA-256. Despite its upstream
+filename `vmlinux`, it is a raw `Image`, not ELF. Use another compatible Image with
+`make run:linux-aarch64 KERNEL=/absolute/path/to/Image`.
 It needs built-in GICv3, architected timers, PSCI, initramfs, ELF, OF 8250, virtio-MMIO
 and virtio-console drivers.
 

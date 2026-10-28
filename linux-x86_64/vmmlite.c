@@ -1,5 +1,5 @@
 // vmmlite.c: the smallest VMM that boots Linux (x86_64, KVM). For learning only.
-// Build: gcc -O2 -pthread -o vmmlite vmmlite.c    Run: ./vmmlite bzImage initramfs.cpio
+// From the repo root: make build:linux-x86_64    Run: make run:linux-x86_64 KERNEL=/path/to/bzImage
 //
 //   vmmlite (this process)       KVM (host kernel)               CPU (VT-x / AMD-V)
 //   +--------------------+ ioctl +-----------------------+ entry +--------------------+

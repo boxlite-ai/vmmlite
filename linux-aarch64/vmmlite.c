@@ -1,5 +1,5 @@
 // vmmlite.c: a tiny VMM that boots Linux (AArch64, KVM). For learning only.
-// Build and run: see README.md.
+// From the repo root: make build:linux-aarch64    Run: make run:linux-aarch64
 //
 //   vmmlite (this process)       KVM (host kernel)                ARM64 CPU
 //   +--------------------+ ioctl +-----------------------+ entry +--------------------+

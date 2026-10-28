@@ -1,5 +1,5 @@
 // vmmlite.c: a tiny VMM that boots Linux (arm64, Hypervisor.framework). For learning only.
-// Build: make    Run: .build/vmmlite Image .build/initramfs.cpio .build/machine.dtb
+// From the repo root: make build:macos-arm64    Run: make run:macos-arm64 KERNEL=/path/to/Image
 //
 //   vmmlite (this process)       Hypervisor.framework           Apple Silicon
 //   +--------------------+ calls +-----------------------+ entry +--------------------+
