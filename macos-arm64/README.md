@@ -24,20 +24,20 @@ brew install filosottile/musl-cross/musl-cross
 From the repository root:
 
 ```sh
-cd macos
-make
-make kernel
-make run
+make build:macos-arm64
+make kernel:macos-arm64
+make run:macos-arm64
 ```
 
-`make` builds and signs the Mac VMM, compiles [machine.dts](machine.dts), and compiles
+The root [Makefile](../Makefile) builds and signs the Mac VMM, compiles [machine.dts](machine.dts), and compiles
 [../init.c](../init.c) for Linux. The hypervisor entitlement permits the framework calls;
 it does not sandbox the VMM. The Mac compiler cannot build Linux's PID 1.
+Generated files and logs live in `.build/macos-arm64/` at the repository root.
 
-`make kernel` downloads Firecracker's public ARM64 Linux 6.1.102 test Image and checks its
+`make kernel:macos-arm64` downloads Firecracker's public ARM64 Linux 6.1.102 test Image and checks its
 SHA-256. This is an uncompressed ARM64 Image despite the download's `vmlinux` name.
 It is a reproducible fixture, not a production kernel recommendation. To use another
-compatible Image: `make run KERNEL=/absolute/path/to/Image`.
+compatible Image: `make run:macos-arm64 KERNEL=/absolute/path/to/Image`.
 
 Trimmed output:
 
@@ -102,8 +102,8 @@ There is no disk, network, keyboard input, second vCPU or guest firmware.
 | --- | --- | --- |
 | Apple M5 Pro, macOS 27.0.1 | ARM64 Linux 6.1.102 | UART → hvc0 → PID 1 → PSCI, exit 0 |
 
-`make test` runs native loader/queue/UART checks, three real boots, timer wakeup and 300
-ordered console writes, plus malformed-input checks. Logs are under `.build/`.
+`make test:macos-arm64` runs native loader/queue/UART checks, three real boots, timer wakeup and 300
+ordered console writes, plus malformed-input checks. Logs are under `.build/macos-arm64/`.
 The macOS 15 API minimum has not been runtime-tested. libfdt must also support the target
 OS: the Homebrew library on the tested host was built for macOS 26 and emits a linker
 warning against the 15 deployment target. Use a compatible libfdt for an older host.

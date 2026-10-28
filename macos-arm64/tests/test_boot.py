@@ -4,7 +4,7 @@ import subprocess
 import sys
 import tempfile
 
-build = Path('.build')
+build = Path(__file__).resolve().parents[2] / '.build' / 'macos-arm64'
 kernel = Path(sys.argv[1])
 command = [str(build / 'vmmlite'), str(kernel), str(build / 'initramfs.cpio'), str(build / 'machine.dtb')]
 subprocess.run(['codesign', '--verify', '--strict', command[0]], check=True)
@@ -17,7 +17,7 @@ def boot(initramfs, log_name, greeting):
         result = subprocess.run(args, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired as error:
         (build / log_name).write_bytes((error.stdout or b'') + (error.stderr or b''))
-        raise AssertionError(f'Linux boot timed out; see .build/{log_name}') from error
+        raise AssertionError(f'Linux boot timed out; see {build / log_name}') from error
     output = (result.stdout + result.stderr).decode(errors='replace')
     (build / log_name).write_text(output)
     assert result.returncode == 0, output[-5000:]

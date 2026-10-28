@@ -1,5 +1,5 @@
 // vmmlite.c: a small VMM that boots Linux (x86_64, Windows WHP). For learning only.
-// Build: make build    Run: .\vmmlite.exe bzImage initramfs.cpio
+// From the repo root: make build:windows-x86_64    Run: make boot:windows-x86_64 KERNEL=/path/to/bzImage
 // Native Windows boot is still unverified; README.md records the validation boundary.
 //
 //   vmmlite (this process)             WHP / Microsoft hypervisor       CPU (VT-x / AMD-V)

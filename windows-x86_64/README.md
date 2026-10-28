@@ -23,11 +23,12 @@ build. Zig supplies MinGW WHP headers and import libraries; a separate Windows S
 is not needed for this build.
 
 ```sh
-cd windows-x86_64
-make build
+make build:windows-x86_64
 ```
 
-The output is `vmmlite.exe`. It imports `WinHvPlatform.dll` and
+Run the target from the repository root. The shared [Makefile](../Makefile) writes
+`.build/windows-x86_64/vmmlite.exe` and copies the boot harness beside it.
+The executable imports `WinHvPlatform.dll` and
 `WinHvEmulation.dll` from Windows. The whole VMM is in [vmmlite.c](vmmlite.c), including the loader and device helpers.
 
 ### Prepare the Linux guest
@@ -35,12 +36,11 @@ The output is `vmmlite.exe`. It imports `WinHvPlatform.dll` and
 On Linux/macOS, with Zig, Make and `cpio` available:
 
 ```sh
-cd windows-x86_64
-make guest
+make guest:windows-x86_64
 ```
 
-This builds `../init.c` as a static **Linux x86_64 ELF**, then puts `/init` into
-`initramfs.cpio`. The Windows executable and Linux executable are different
+This builds the shared root `init.c` as a static **Linux x86_64 ELF**, then puts `/init` into
+`.build/windows-x86_64/initramfs.cpio`. The Windows executable and Linux executable are different
 targets, even though they share an x86_64 instruction set.
 
 Use an x86_64 **bzImage**, not an ELF `vmlinux` or an ARM64 `Image`. The loader
@@ -75,7 +75,7 @@ will not work with this minimal archive.
 An optional host-side check loads your real artifacts through the same loader:
 
 ```sh
-make check-image KERNEL=/path/to/bzImage
+make check-image:windows-x86_64 KERNEL=/path/to/bzImage
 ```
 
 This checks the image handoff and memory placement; it does not execute the guest.
@@ -91,8 +91,8 @@ Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All
 ```
 
 If Windows itself is a VM, its outer hypervisor must expose nested virtualization.
-Copy `vmmlite.exe`, `bzImage`, `initramfs.cpio` and `test-boot.ps1` into one Windows
-directory. Run in that directory:
+Copy `vmmlite.exe`, `initramfs.cpio` and `test-boot.ps1` from `.build/windows-x86_64/`,
+plus your `bzImage`, into one Windows directory. Run in that directory:
 
 ```powershell
 .\vmmlite.exe --probe
@@ -190,10 +190,11 @@ synchronously while the single VP is stopped. This avoids the Linux example's
 On macOS/Linux with a C compiler supporting ASan and UBSan:
 
 ```sh
-make check
+make check:windows-x86_64
 ```
 
-`make check` runs the device/loader tests and builds the Windows executable.
+Run this from the repository root. `make check:windows-x86_64` runs the device/loader
+tests and builds the Windows executable. `make test:windows-x86_64` runs only the portable tests.
 Tests cover malformed boot headers and overlapping initialization windows,
 PIC priority and cascade, IOAPIC edge/level behavior, PIT count latches and
 calibration output, UART divisor access, virtio negotiation, descriptor bounds,
@@ -203,7 +204,7 @@ They cannot establish WHP register acceptance, timer delivery, or guest boot.
 ## Learn more
 
 - [The original Linux/KVM example](../linux-x86_64/README.md)
-- [The macOS/Apple Silicon companion](../macos/README.md)
+- [The macOS/Apple Silicon companion](../macos-arm64/README.md)
 - [WHP API](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-platform/hypervisor-platform) and [instruction emulator](https://learn.microsoft.com/en-us/virtualization/api/hypervisor-instruction-emulator/hypervisor-instruction-emulator)
 - [Linux x86 boot protocol](https://docs.kernel.org/arch/x86/boot.html) and [virtio specification](https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html)
 - [Design and native acceptance](https://github.com/boxlite-ai/vmmlite/issues/13)

@@ -12,25 +12,27 @@
 390 lines of C, not counting comments, that boot a stock x86_64 Linux kernel on KVM to a PID 1 that
 prints one line through a virtio console and reboots.
 
-The [macOS / Apple Silicon companion](../macos/README.md) boots ARM64 Linux with
+The [macOS / Apple Silicon companion](../macos-arm64/README.md) boots ARM64 Linux with
 Hypervisor.framework, a framework GICv3, and a modern virtio-MMIO console. Its walkthrough covers
 the device tree, ARM entry registers, interrupts, and the complete build and boot test.
 
 ## Run it
 
 You need x86_64 Linux with KVM, access to `/dev/kvm` (on Ubuntu, join the `kvm` group), and gcc
-with static glibc and cpio (on Ubuntu, `sudo apt install gcc libc6-dev cpio`).
+with static glibc, GNU Make and cpio (on Ubuntu, `sudo apt install gcc libc6-dev make cpio`).
 
 From the repository root:
 
 ```sh
-cd linux-x86_64
-gcc -O2 -Wall -Wextra -pthread -o vmmlite vmmlite.c
-gcc -O2 -Wall -Wextra -static -o init ../init.c
-echo init | cpio -o -H newc > initramfs.cpio
-sudo install -m 644 /boot/vmlinuz-$(uname -r) bzImage
-./vmmlite bzImage initramfs.cpio
+make build:linux-x86_64
+sudo install -m 644 /boot/vmlinuz-$(uname -r) .build/linux-x86_64/bzImage
+make run:linux-x86_64
 ```
+
+The root [Makefile](../Makefile) places generated files in `.build/linux-x86_64/`.
+Use `KERNEL=/absolute/path/to/bzImage` to select another kernel. For the bounded CI
+check, `make test:linux-x86_64` requires exit 0 and the PID 1 greeting within 120 seconds;
+its log is `.build/linux-x86_64/boot.log`.
 
 Trimmed output:
 

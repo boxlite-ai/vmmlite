@@ -16,7 +16,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: linux-x86_64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,13 +29,9 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Build with warnings as errors
-        run: |
-          gcc -O2 -Wall -Wextra -Werror -pthread -o vmmlite vmmlite.c
-          gcc -O2 -Wall -Wextra -Werror -static -o init ../init.c
-          echo init | cpio -o -H newc > initramfs.cpio
+        run: make build:linux-x86_64
 
       - name: Boot the runner's own kernel
         run: |
-          sudo install -m 644 "/boot/vmlinuz-$(uname -r)" bzImage
-          timeout 120 ./vmmlite bzImage initramfs.cpio | tee boot.log
-          grep -q 'Hello from PID 1!' boot.log
+          sudo install -m 644 "/boot/vmlinuz-$(uname -r)" .build/linux-x86_64/bzImage
+          make test:linux-x86_64
