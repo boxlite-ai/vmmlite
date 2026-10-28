@@ -12,6 +12,7 @@ Choose the example for your host:
 | Host | Virtualization API | Code and walkthrough |
 | --- | --- | --- |
 | Linux, x86_64 | KVM | [linux-x86_64/](linux-x86_64/README.md) |
+| Linux, ARM64 | KVM | [linux-aarch64/](linux-aarch64/README.md) |
 | macOS, Apple Silicon | Hypervisor.framework | [macos/](macos/README.md) |
 
 Each directory contains its VMM and platform-specific build and boot instructions. The shared
